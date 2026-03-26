@@ -232,24 +232,9 @@ class RobotEnumHintService {
   async _buildIndex(workspaceFolder) {
     const includePattern = new vscode.RelativePattern(workspaceFolder, "**/*.py");
     const excludePattern = "**/{.git,.venv,venv,__pycache__,node_modules,tests}/**";
-    const pythonFiles = await vscode.workspace.findFiles(includePattern, excludePattern, 4000);
+    const pythonFiles = await vscode.workspace.findFiles(includePattern, excludePattern);
 
-    const filteredFiles = pythonFiles.filter((fileUri) => {
-      const normalizedPath = fileUri.path.toLowerCase();
-      if (normalizedPath.includes("/gen/")) {
-        return false;
-      }
-      if (normalizedPath.includes("/generated/")) {
-        return false;
-      }
-      if (normalizedPath.includes("/xml_models/")) {
-        return false;
-      }
-      if (normalizedPath.includes("/camunda_7_23/")) {
-        return false;
-      }
-      return true;
-    });
+    const filteredFiles = pythonFiles;
 
     const enumsByName = new Map();
     const keywordDefinitions = [];
@@ -270,7 +255,7 @@ class RobotEnumHintService {
         enumsByName.set(enumDefinition.name, existing);
       }
 
-      if (fileUri.path.toLowerCase().includes("/keywords/")) {
+      if (fileContent.includes("@keyword")) {
         keywordDefinitions.push(...parseKeywordEnumHintsFromPythonSource(fileContent));
       }
     }
@@ -352,17 +337,22 @@ class RobotDocHoverProvider {
     }
 
     const parsed = this._parser.getParsed(document);
+    if (isEnumValueHoverEnabled()) {
+      try {
+        const enumHover = await createEnumValueHover(document, position, this._enumHintService);
+        if (enumHover) {
+          return enumHover;
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        console.warn("[robot-markdown-companion] Enum hover failed:", message);
+      }
+    }
+
     if (isVariableValueHoverEnabled()) {
       const variableHover = createVariableValueHover(document, parsed, position);
       if (variableHover) {
         return variableHover;
-      }
-    }
-
-    if (isEnumValueHoverEnabled()) {
-      const enumHover = await createEnumValueHover(document, position, this._enumHintService);
-      if (enumHover) {
-        return enumHover;
       }
     }
 
@@ -1356,6 +1346,14 @@ async function createEnumValueHover(document, position, enumHintService) {
   const normalizedKeyword = normalizeKeywordName(context.keywordName);
   const normalizedArgument = normalizeArgumentName(context.argumentName);
   const mappedEnums = index.keywordArgs.get(normalizedKeyword)?.get(normalizedArgument) || [];
+  const mappedEnumsByArgumentName = [];
+  if (mappedEnums.length === 0) {
+    for (const argsMap of index.keywordArgs.values()) {
+      const enumNamesForArgument = argsMap.get(normalizedArgument) || [];
+      mappedEnumsByArgumentName.push(...enumNamesForArgument);
+    }
+  }
+  const argumentFallbackEnums = uniqueStrings(mappedEnumsByArgumentName);
 
   let candidates = [];
   if (mappedEnums.length > 0) {
@@ -1363,14 +1361,10 @@ async function createEnumValueHover(document, position, enumHintService) {
       const enums = index.enumsByName.get(enumName) || [];
       candidates.push(...enums);
     }
-  } else {
-    const normalizedValue = context.argumentValue.toLowerCase();
-    for (const enums of index.enumsByName.values()) {
-      for (const enumEntry of enums) {
-        if (doesEnumContainValue(enumEntry, normalizedValue)) {
-          candidates.push(enumEntry);
-        }
-      }
+  } else if (argumentFallbackEnums.length > 0) {
+    for (const enumName of argumentFallbackEnums) {
+      const enums = index.enumsByName.get(enumName) || [];
+      candidates.push(...enums);
     }
   }
 
@@ -1452,7 +1446,7 @@ async function createEnumValueHover(document, position, enumHintService) {
     );
   }
 
-  const range = new vscode.Range(position.line, context.valueStart, position.line, context.valueEnd);
+  const range = new vscode.Range(position.line, context.hoverStart, position.line, context.hoverEnd);
   return new vscode.Hover(markdown, range);
 }
 
@@ -1492,7 +1486,10 @@ function getNamedArgumentValueContextAtPosition(document, position) {
   }
 
   const headerLine = findKeywordCallHeaderLine(document, position.line);
-  const keywordName = extractKeywordNameFromRobotCallLine(document.lineAt(headerLine).text);
+  let keywordName = extractKeywordNameFromRobotCallLine(document.lineAt(headerLine).text);
+  if (!keywordName && isArgumentsHeaderLine(document.lineAt(headerLine).text)) {
+    keywordName = findOwningKeywordNameForArgumentsBlock(document, headerLine);
+  }
   if (!keywordName) {
     return undefined;
   }
@@ -1501,8 +1498,8 @@ function getNamedArgumentValueContextAtPosition(document, position) {
     keywordName,
     argumentName: namedArgument.name,
     argumentValue: namedArgument.value,
-    valueStart: namedArgument.valueStart,
-    valueEnd: namedArgument.valueEnd
+    hoverStart: namedArgument.hoverStart,
+    hoverEnd: namedArgument.hoverEnd
   };
 }
 
@@ -1518,6 +1515,36 @@ function findKeywordCallHeaderLine(document, line) {
   return headerLine;
 }
 
+function isArgumentsHeaderLine(lineText) {
+  return String(lineText || "").trim().toLowerCase() === "[arguments]";
+}
+
+function findOwningKeywordNameForArgumentsBlock(document, fromLine) {
+  for (let line = fromLine - 1; line >= 0; line -= 1) {
+    const sourceLine = document.lineAt(line).text;
+    const trimmed = sourceLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    if (isSectionHeader(trimmed)) {
+      return "";
+    }
+
+    if (/^[ \t]/.test(sourceLine)) {
+      continue;
+    }
+
+    if (trimmed.startsWith("[") || trimmed.startsWith("...")) {
+      continue;
+    }
+
+    return trimmed;
+  }
+
+  return "";
+}
+
 function extractKeywordNameFromRobotCallLine(lineText) {
   const cells = splitRobotCellsWithRanges(lineText);
   if (cells.length === 0) {
@@ -1525,8 +1552,20 @@ function extractKeywordNameFromRobotCallLine(lineText) {
   }
 
   let keywordIndex = 0;
-  if (/^[@$&%]\{[^}]+\}\s*=$/.test(cells[0].text.trim()) && cells.length > 1) {
-    keywordIndex = 1;
+  while (keywordIndex < cells.length && cells[keywordIndex].text.trim() === "...") {
+    keywordIndex += 1;
+  }
+
+  while (
+    keywordIndex < cells.length &&
+    (/^[@$&%]\{[^}]+\}\s*=$/.test(cells[keywordIndex].text.trim()) ||
+      /^[@$&%]\{[^}]+\}$/.test(cells[keywordIndex].text.trim()))
+  ) {
+    keywordIndex += 1;
+  }
+
+  if (keywordIndex < cells.length && cells[keywordIndex].text.trim() === "=") {
+    keywordIndex += 1;
   }
 
   const keywordName = cells[keywordIndex]?.text.trim() || "";
@@ -1549,29 +1588,33 @@ function findNamedArgumentAtPosition(lineText, character) {
       continue;
     }
 
-    const name = cell.text.slice(0, eqIndex).trim();
+    const namePart = cell.text.slice(0, eqIndex);
+    const name = namePart.trim();
     if (!name) {
       continue;
     }
 
     const rawValue = cell.text.slice(eqIndex + 1);
     const trimmedValue = rawValue.replace(/^\s+/, "");
-    if (!trimmedValue) {
-      continue;
-    }
-
+    const nameStartOffset = namePart.indexOf(name);
+    const nameStart = cell.start + Math.max(0, nameStartOffset);
+    const nameEnd = nameStart + name.length;
     const leftTrimmedLength = rawValue.length - trimmedValue.length;
     const valueStart = cell.start + eqIndex + 1 + leftTrimmedLength;
     const valueEnd = valueStart + trimmedValue.length;
+    const isOnName = character >= nameStart && character < nameEnd;
+    const isOnValue = character >= valueStart && character < valueEnd;
 
-    if (character >= valueStart && character < valueEnd) {
-      return {
-        name,
-        value: trimmedValue,
-        valueStart,
-        valueEnd
-      };
+    if (!isOnName && !isOnValue) {
+      continue;
     }
+
+    return {
+      name,
+      value: trimmedValue,
+      hoverStart: isOnName ? nameStart : valueStart,
+      hoverEnd: isOnName ? nameEnd : valueEnd
+    };
   }
 
   return undefined;
@@ -1761,7 +1804,7 @@ function collectFunctionSignature(lines, startLine) {
   let depth = (signatureText.match(/\(/g) || []).length - (signatureText.match(/\)/g) || []).length;
   let endLine = startLine;
 
-  while (depth > 0 && endLine + 1 < lines.length && endLine - startLine < 30) {
+  while (depth > 0 && endLine + 1 < lines.length && endLine - startLine < 300) {
     endLine += 1;
     const part = lines[endLine].trim();
     signatureText += ` ${part}`;
@@ -1955,14 +1998,30 @@ function findTopLevelCharIndex(source, targetChar) {
 }
 
 function normalizeKeywordName(keywordName) {
-  return String(keywordName || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  return normalizeComparableToken(keywordName);
 }
 
 function normalizeArgumentName(argumentName) {
-  return String(argumentName || "").trim().toLowerCase();
+  let normalized = String(argumentName || "").trim();
+  const robotVarMatch = normalized.match(/^[$@&%]\{(.+)\}$/);
+  if (robotVarMatch) {
+    normalized = robotVarMatch[1].trim();
+  }
+
+  return normalizeComparableToken(normalized);
+}
+
+function normalizeComparableToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\s_-]+/g, "");
 }
 
 function uniqueStrings(values) {
@@ -2113,6 +2172,10 @@ function isHoverPreviewEnabled() {
   return getConfig().get("enableHoverPreview", true);
 }
 
+function isEnumValueHoverEnabled() {
+  return getConfig().get("enableEnumValueHover", true);
+}
+
 function isVariableValueHoverEnabled() {
   return getConfig().get("enableVariableValueHover", true);
 }
@@ -2135,6 +2198,22 @@ function getHoverLineLimit() {
     return 300;
   }
   return Math.max(20, Math.min(500, Math.round(raw)));
+}
+
+function getEnumHoverMaxEnums() {
+  const raw = Number(getConfig().get("enumHoverMaxEnums", 6));
+  if (!Number.isFinite(raw)) {
+    return 6;
+  }
+  return Math.max(1, Math.min(20, Math.round(raw)));
+}
+
+function getEnumHoverMaxMembers() {
+  const raw = Number(getConfig().get("enumHoverMaxMembers", 30));
+  if (!Number.isFinite(raw)) {
+    return 30;
+  }
+  return Math.max(5, Math.min(500, Math.round(raw)));
 }
 
 function getVariableHoverLineLimit() {

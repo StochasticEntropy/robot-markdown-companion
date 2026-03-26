@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Markdown Companion",
   "description": "Read-only markdown preview plus Set Variable value hovers for Robot Framework files.",
-  "version": "0.1.3",
+  "version": "0.1.8",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -50,6 +50,9 @@
   },
   "activationEvents": [
     "onLanguage:robotframework",
+    "onStartupFinished",
+    "workspaceContains:**/*.robot",
+    "workspaceContains:**/*.resource",
     "onCommand:robotDocPreview.toggle",
     "onCommand:robotDocPreview.openCurrentBlock",
     "onView:robotDocPreview.view"
@@ -108,6 +111,11 @@
           "default": true,
           "description": "Show rendered documentation preview on hover within documentation lines."
         },
+        "robotDocPreview.enableEnumValueHover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show enum value hints when hovering named argument values in Robot keyword calls."
+        },
         "robotDocPreview.enableVariableValueHover": {
           "type": "boolean",
           "default": true,
@@ -131,6 +139,20 @@
           "minimum": 20,
           "maximum": 500,
           "description": "Maximum number of documentation lines shown inside hover preview before truncation."
+        },
+        "robotDocPreview.enumHoverMaxEnums": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum number of matching enum types shown in enum hover."
+        },
+        "robotDocPreview.enumHoverMaxMembers": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 500,
+          "description": "Maximum number of enum members shown per enum in enum hover."
         },
         "robotDocPreview.variableHoverLineLimit": {
           "type": "number",
