@@ -1243,6 +1243,35 @@ class RobotReturnPreviewViewProvider {
     const notice = this._state.infoMessage
       ? `<div class=\"notice\">${escapeHtml(this._state.infoMessage)}</div>`
       : "";
+    const hasCurrentValue = String(this._state.currentValue || "").length > 0;
+    const hasCurrentValueSourceLine =
+      Number.isFinite(Number(this._state.currentValueSourceLine)) &&
+      Number(this._state.currentValueSourceLine) >= 0;
+    const currentValueSourceLineNumber = hasCurrentValueSourceLine
+      ? Number(this._state.currentValueSourceLine) + 1
+      : undefined;
+    const currentValueSourceCommand =
+      hasCurrentValueSourceLine && this._state.documentUri
+        ? buildOpenLocationCommandUri(this._state.documentUri, Number(this._state.currentValueSourceLine))
+        : "";
+    const currentValueSummary = hasCurrentValue
+      ? `<div class=\"current-value-box\">
+          <div class=\"current-value-title\">Current value</div>
+          <div class=\"current-value-content\"><code>${escapeHtml(this._state.currentValue)}</code></div>
+          ${
+            String(this._state.currentValueSource || "").toLowerCase() === "set-variable" && hasCurrentValueSourceLine
+              ? `<div class=\"current-value-source\">
+                  From <code>Set Variable</code> line ${currentValueSourceLineNumber}
+                  ${
+                    currentValueSourceCommand
+                      ? `&nbsp;&middot;&nbsp;<a href=\"${currentValueSourceCommand}\">Jump to assignment</a>`
+                      : ""
+                  }
+                </div>`
+              : ""
+          }
+        </div>`
+      : "";
     const returnAnnotation = !isEnumContext && this._state.returnAnnotation
       ? `<div class=\"annotation\"><span class=\"label\">Return:</span> <code>${escapeHtml(
           this._state.returnAnnotation
@@ -1292,6 +1321,38 @@ class RobotReturnPreviewViewProvider {
       font-size: 0.92em;
       word-break: break-word;
     }
+    .current-value-box {
+      margin-bottom: 10px;
+      border: 1px solid var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-testing-iconPassed));
+    }
+    .current-value-title {
+      font-size: 0.82em;
+      font-weight: 700;
+      color: var(--vscode-testing-iconPassed);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 4px;
+    }
+    .current-value-content code {
+      color: var(--vscode-testing-iconPassed);
+      font-weight: 700;
+      font-size: 1.05em;
+    }
+    .current-value-source {
+      margin-top: 6px;
+      font-size: 0.88em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .current-value-source a {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+    .current-value-source a:hover {
+      text-decoration: underline;
+    }
     .label {
       font-weight: 600;
       color: var(--vscode-foreground);
@@ -1313,6 +1374,7 @@ class RobotReturnPreviewViewProvider {
 </head>
 <body>
   ${fileInfo}
+  ${currentValueSummary}
   ${metadata}
   ${notice}
   ${returnAnnotation}
@@ -1474,11 +1536,15 @@ class RobotReturnExplorerController {
       const owner = findOwnerForLine(parsed.owners, editor.selection.active.line);
       this._previewProvider.update({
         contextKind: "enum",
+        documentUri: parsed.uri,
         fileName: parsed.fileName,
         ownerName: owner ? owner.name : "",
         variableToken: enumContext.argumentName,
         keywordName: enumContext.keywordName,
         returnAnnotation: "",
+        currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
+        currentValueSource: enumContext.currentValueSource || "",
+        currentValueSourceLine: enumContext.currentValueSourceLine,
         detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
         infoMessage: ""
       });
@@ -1889,11 +1955,15 @@ function createEmptyPreviewState(infoMessage = "") {
 function createEmptyReturnPreviewState(infoMessage = "") {
   return {
     contextKind: "",
+    documentUri: "",
     fileName: "",
     ownerName: "",
     variableToken: "",
     keywordName: "",
     returnAnnotation: "",
+    currentValue: "",
+    currentValueSource: "",
+    currentValueSourceLine: undefined,
     detailsMarkdown: "",
     infoMessage
   };
@@ -2144,22 +2214,38 @@ function createVariableValueHover(document, parsed, position) {
     return undefined;
   }
 
+  const valueLines =
+    selectedAssignment.valueRaw.length === 0 ? [] : selectedAssignment.valueRaw.split(/\r?\n/);
+  const lineLimit = getVariableHoverLineLimit();
+  const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
+  const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
+  const currentValueSummary = shownLines.length > 0 ? shownLines[0] : "";
+
   const markdown = new vscode.MarkdownString();
-  markdown.supportHtml = false;
+  markdown.isTrusted = {
+    enabledCommands: [CMD_OPEN_LOCATION]
+  };
+  markdown.supportHtml = true;
   markdown.appendMarkdown("### Robot Variable Value\n\n");
+  if (currentValueSummary.length > 0) {
+    markdown.appendMarkdown(
+      `<span style="color: var(--vscode-testing-iconPassed); font-weight: 700;">Current value:</span> ` +
+        `<code>${escapeHtml(currentValueSummary)}</code>\n\n`
+    );
+  }
   markdown.appendMarkdown("**Variable:** ");
   markdown.appendText(variableToken.token);
   markdown.appendMarkdown("  \n");
   markdown.appendMarkdown("**Owner:** ");
   markdown.appendText(owner.name);
   markdown.appendMarkdown("  \n");
-  markdown.appendMarkdown(`**Source:** \`Set Variable\` at line ${selectedAssignment.startLine + 1}\n\n`);
-
-  const valueLines =
-    selectedAssignment.valueRaw.length === 0 ? [] : selectedAssignment.valueRaw.split(/\r?\n/);
-  const lineLimit = getVariableHoverLineLimit();
-  const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
-  const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
+  markdown.appendMarkdown(`**Source:** \`Set Variable\` at line ${selectedAssignment.startLine + 1}  \n`);
+  const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), selectedAssignment.startLine);
+  if (sourceCommand) {
+    markdown.appendMarkdown(`[Jump to Set Variable line ${selectedAssignment.startLine + 1}](${sourceCommand})\n\n`);
+  } else {
+    markdown.appendMarkdown("\n");
+  }
 
   if (shownLines.length === 0) {
     markdown.appendMarkdown("_Assigned empty value._");
@@ -2828,8 +2914,12 @@ async function createEnumValueHover(document, position, enumHintService, parsed)
   markdown.isTrusted = {
     enabledCommands: [CMD_OPEN_LOCATION]
   };
-  markdown.supportHtml = false;
+  markdown.supportHtml = true;
   markdown.appendMarkdown(shownEnums.length > 0 ? "### Robot Enum Hint\n\n" : "### Robot Argument Hint\n\n");
+  markdown.appendMarkdown(
+    `<span style="color: var(--vscode-testing-iconPassed); font-weight: 700;">Current value:</span> ` +
+      `<code>${escapeHtml(String(context.currentValue || context.argumentValue || ""))}</code>\n\n`
+  );
   markdown.appendMarkdown("**Keyword:** ");
   markdown.appendText(context.keywordName);
   markdown.appendMarkdown("  \n");

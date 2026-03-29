@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.27
+
+- Improved current-value visibility in hover and side panel:
+  - Shows a prominent current-value highlight at the top of enum hints.
+  - Shows clearer current-value summary in variable hover.
+  - Adds direct jump links to `Set Variable` source lines in variable hover.
+  - Adds a current-value summary card in the side panel for enum context, including source and jump link when available.
+
 ## 0.1.26
 
 - Added typed variable dropdown suggestions for named argument values in Robot keyword calls.
