@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Read-only documentation preview plus variable/enum/typed return structure hovers for Robot Framework files.",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -208,6 +208,33 @@
           "minimum": 1,
           "maximum": 12,
           "description": "Maximum nested access depth shown in the 'Return Hint For Argument Value' section (hover + side panel)."
+        },
+        "robotDocPreview.returnSubtypeResolutionMode": {
+          "type": "string",
+          "enum": [
+            "always",
+            "never",
+            "include",
+            "exclude"
+          ],
+          "default": "always",
+          "description": "How generic return subtypes are resolved (for example list[T], ListWrapper[T])."
+        },
+        "robotDocPreview.returnSubtypeIncludeContainers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Container names allowed for subtype resolution in 'include' mode (case-insensitive)."
+        },
+        "robotDocPreview.returnSubtypeExcludeContainers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Container names blocked for subtype resolution in 'exclude' mode (case-insensitive)."
         },
         "robotDocPreview.returnMaxFieldsPerType": {
           "type": "number",

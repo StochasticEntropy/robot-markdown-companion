@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.32
+
+- Added configurable generic subtype return resolution across return hover, side panel, and argument return hints:
+  - `robotDocPreview.returnSubtypeResolutionMode` (`always` | `never` | `include` | `exclude`, default `always`)
+  - `robotDocPreview.returnSubtypeIncludeContainers` (default `[]`)
+  - `robotDocPreview.returnSubtypeExcludeContainers` (default `[]`)
+- Return annotation parsing now resolves nested generic subtypes (for example `list[T]`, `ListWrapper[T]`, `Optional[list[T]]`) based on the selected policy.
+- Structured type indexing now marks indexable wrappers (`__getitem__` / `__iter__`) and uses that signal for include-mode subtype resolution.
+- Collection-like return hints now emit both access styles, including indexed Robot syntax `${var[0].field}`.
+
 ## 0.1.31
 
 - Added configurable depth for **Return Hint For Argument Value**:

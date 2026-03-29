@@ -80,6 +80,18 @@ const SIMPLE_RETURN_IGNORED_FIELD_NAMES = new Set([
   "validierungen",
   "validation"
 ]);
+const RETURN_SUBTYPE_RESOLUTION_MODES = new Set(["always", "never", "include", "exclude"]);
+const BUILTIN_INDEXABLE_RETURN_CONTAINERS = new Set([
+  "list",
+  "tuple",
+  "set",
+  "frozenset",
+  "sequence",
+  "iterable",
+  "iterator",
+  "deque",
+  "listwrapper"
+]);
 
 function activate(context) {
   const parser = new RobotDocumentationService();
@@ -446,6 +458,13 @@ class RobotEnumHintService {
 
     propagateRobotKeywordHints(robotKeywordDefinitions, keywordArgs, keywordArgAnnotations);
 
+    const indexableStructuredTypeNames = new Set();
+    for (const [typeName, candidates] of structuredTypesByName.entries()) {
+      if ((candidates || []).some((candidate) => candidate.isIndexableWrapper)) {
+        indexableStructuredTypeNames.add(normalizeComparableToken(typeName));
+      }
+    }
+
     return {
       enumsByName,
       keywordArgs,
@@ -453,7 +472,8 @@ class RobotEnumHintService {
       keywordReturns,
       localEnumNamesByFile,
       enumImportAliasesByFile,
-      structuredTypesByName
+      structuredTypesByName,
+      indexableStructuredTypeNames
     };
   }
 }
@@ -2478,8 +2498,14 @@ async function resolveKeywordReturnPreview(document, parsed, position, enumHintS
 
   const normalizedKeyword = normalizeKeywordName(variableContext.assignment.keywordName);
   const returnAnnotation = String(index.keywordReturns?.get(normalizedKeyword) || "").trim();
-  const rootTypeNames = extractIndexedTypeNamesFromAnnotation(returnAnnotation, index);
+  const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
+  const returnTypeResolution = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+    policy: subtypePolicy
+  });
+  const rootTypeNames = returnTypeResolution.typeNames;
   const simpleAccess = buildSimpleReturnAccessPaths(variableContext.variableToken.token, rootTypeNames, index, {
+    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+    subtypePolicy,
     maxFieldsPerType: Math.max(1, Number(options.maxFieldsPerType) || 1)
   });
   const technicalStructureLines = buildReturnStructureLines(
@@ -2662,8 +2688,14 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
 
   const normalizedKeyword = normalizeKeywordName(selectedAssignment.keywordName);
   const returnAnnotation = String(index.keywordReturns?.get(normalizedKeyword) || "").trim();
-  const rootTypeNames = extractIndexedTypeNamesFromAnnotation(returnAnnotation, index);
+  const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
+  const returnTypeResolution = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+    policy: subtypePolicy
+  });
+  const rootTypeNames = returnTypeResolution.typeNames;
   const simpleAccess = buildSimpleReturnAccessPaths(rawArgumentValue, rootTypeNames, index, {
+    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+    subtypePolicy,
     maxDepth: getReturnHintArgumentMaxDepth(),
     maxFieldsPerType: getReturnMaxFieldsPerType()
   });
@@ -2694,31 +2726,327 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
   };
 }
 
-function extractIndexedTypeNamesFromAnnotation(annotation, index) {
-  if (!annotation) {
+function extractIndexedTypeNamesFromAnnotation(annotation, index, options = {}) {
+  return resolveIndexedTypesFromAnnotation(annotation, index, options).typeNames;
+}
+
+function resolveIndexedTypesFromAnnotation(annotation, index, options = {}) {
+  if (!annotation || !index) {
+    return {
+      typeNames: [],
+      hasCollectionSubtype: false,
+      containerNames: []
+    };
+  }
+
+  const nodes = parseTypeAnnotationNodes(annotation);
+  if (nodes.length === 0) {
+    return {
+      typeNames: [],
+      hasCollectionSubtype: false,
+      containerNames: []
+    };
+  }
+
+  const policy = options.policy || getReturnSubtypeResolutionPolicy(index);
+  const typeNames = [];
+  const containerNames = new Set();
+  let hasCollectionSubtype = false;
+
+  const visitNode = (node, insideCollectionContainer = false) => {
+    if (!node) {
+      return;
+    }
+
+    if (node.kind === "union" || node.kind === "tuple") {
+      for (const item of node.items || []) {
+        visitNode(item, insideCollectionContainer);
+      }
+      return;
+    }
+
+    if (node.kind !== "name") {
+      return;
+    }
+
+    const nodeName = extractTypeSimpleName(node.name);
+    if (hasIndexedTypeForName(index, nodeName)) {
+      typeNames.push(nodeName);
+      if (insideCollectionContainer) {
+        hasCollectionSubtype = true;
+      }
+    }
+
+    const args = Array.isArray(node.args) ? node.args : [];
+    if (args.length === 0) {
+      return;
+    }
+
+    const normalizedContainerName = normalizeComparableToken(nodeName);
+    if (!shouldResolveSubtypeFromContainer(normalizedContainerName, policy)) {
+      return;
+    }
+
+    containerNames.add(normalizedContainerName);
+    const insideChildCollectionContainer =
+      insideCollectionContainer || policy.collectionContainers.has(normalizedContainerName);
+    for (const argNode of args) {
+      visitNode(argNode, insideChildCollectionContainer);
+    }
+  };
+
+  for (const rootNode of nodes) {
+    visitNode(rootNode, false);
+  }
+
+  return {
+    typeNames: uniqueStrings(typeNames),
+    hasCollectionSubtype,
+    containerNames: [...containerNames]
+  };
+}
+
+function parseTypeAnnotationNodes(annotation) {
+  const tokens = tokenizeTypeAnnotation(annotation);
+  if (tokens.length === 0) {
     return [];
   }
 
-  const tokens = String(annotation).match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) || [];
-  const names = [];
-  for (const token of tokens) {
-    const normalizedToken = String(token).toLowerCase();
-    if (PYTHON_IGNORED_TYPE_TOKENS.has(normalizedToken)) {
+  let pointer = 0;
+
+  const parseSequence = (stopType = "") => {
+    const nodes = [];
+    while (pointer < tokens.length) {
+      const token = tokens[pointer];
+      if (stopType && token.type === stopType) {
+        break;
+      }
+      if (token.type === ",") {
+        pointer += 1;
+        continue;
+      }
+      const node = parseUnion();
+      if (node) {
+        nodes.push(node);
+      } else {
+        pointer += 1;
+      }
+    }
+    return nodes;
+  };
+
+  const parseUnion = () => {
+    let left = parsePrimary();
+    if (!left) {
+      return null;
+    }
+
+    const unionItems = [left];
+    while (pointer < tokens.length && tokens[pointer].type === "|") {
+      pointer += 1;
+      const right = parsePrimary();
+      if (right) {
+        unionItems.push(right);
+      }
+    }
+
+    if (unionItems.length === 1) {
+      return unionItems[0];
+    }
+
+    return {
+      kind: "union",
+      items: unionItems
+    };
+  };
+
+  const parsePrimary = () => {
+    const token = tokens[pointer];
+    if (!token) {
+      return null;
+    }
+
+    if (token.type === "name") {
+      pointer += 1;
+      const node = {
+        kind: "name",
+        name: extractTypeSimpleName(token.value),
+        args: []
+      };
+      if (pointer < tokens.length && tokens[pointer].type === "[") {
+        pointer += 1;
+        node.args = parseSequence("]");
+        if (pointer < tokens.length && tokens[pointer].type === "]") {
+          pointer += 1;
+        }
+      }
+      return node;
+    }
+
+    if (token.type === "(") {
+      pointer += 1;
+      const innerNodes = parseSequence(")");
+      if (pointer < tokens.length && tokens[pointer].type === ")") {
+        pointer += 1;
+      }
+      if (innerNodes.length === 1) {
+        return innerNodes[0];
+      }
+      if (innerNodes.length > 1) {
+        return {
+          kind: "tuple",
+          items: innerNodes
+        };
+      }
+      return null;
+    }
+
+    return null;
+  };
+
+  return parseSequence();
+}
+
+function tokenizeTypeAnnotation(annotation) {
+  const source = String(annotation || "");
+  const tokens = [];
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (/\s/.test(char)) {
+      index += 1;
       continue;
     }
 
-    if (index.structuredTypesByName?.has(token) || index.enumsByName?.has(token)) {
-      names.push(token);
+    if (char === "[" || char === "]" || char === "(" || char === ")" || char === "|" || char === ",") {
+      tokens.push({ type: char, value: char });
+      index += 1;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      const quote = char;
+      let endIndex = index + 1;
+      while (endIndex < source.length) {
+        if (source[endIndex] === quote && source[endIndex - 1] !== "\\") {
+          break;
+        }
+        endIndex += 1;
+      }
+      const quotedValue = source.slice(index + 1, Math.min(endIndex, source.length));
+      const parsedQuotedName = parseQuotedTypeAnnotationName(quotedValue);
+      if (parsedQuotedName) {
+        tokens.push({ type: "name", value: parsedQuotedName });
+      }
+      index = Math.min(endIndex + 1, source.length);
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(char)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && /[A-Za-z0-9_.]/.test(source[index])) {
+        index += 1;
+      }
+      tokens.push({ type: "name", value: source.slice(start, index) });
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return tokens;
+}
+
+function parseQuotedTypeAnnotationName(value) {
+  const source = String(value || "").trim();
+  if (!source) {
+    return "";
+  }
+  const match = source.match(/[A-Za-z_][A-Za-z0-9_.]*/);
+  return match ? match[0] : "";
+}
+
+function extractTypeSimpleName(typeName) {
+  const source = String(typeName || "").trim();
+  if (!source) {
+    return "";
+  }
+  const segments = source.split(".");
+  return String(segments[segments.length - 1] || "").trim();
+}
+
+function hasIndexedTypeForName(index, typeName) {
+  const simpleName = extractTypeSimpleName(typeName);
+  if (!simpleName) {
+    return false;
+  }
+  return Boolean(index.structuredTypesByName?.has(simpleName) || index.enumsByName?.has(simpleName));
+}
+
+function getReturnSubtypeResolutionPolicy(index) {
+  const rawMode = String(getReturnSubtypeResolutionMode() || "always").trim().toLowerCase();
+  const mode = RETURN_SUBTYPE_RESOLUTION_MODES.has(rawMode) ? rawMode : "always";
+  const includeSet = normalizeContainerNameSet(getReturnSubtypeIncludeContainers());
+  const excludeSet = normalizeContainerNameSet(getReturnSubtypeExcludeContainers());
+
+  const collectionContainers = new Set(BUILTIN_INDEXABLE_RETURN_CONTAINERS);
+  for (const includedContainer of includeSet) {
+    collectionContainers.add(includedContainer);
+  }
+  for (const indexableTypeName of index?.indexableStructuredTypeNames || []) {
+    const normalizedTypeName = normalizeComparableToken(indexableTypeName);
+    if (normalizedTypeName) {
+      collectionContainers.add(normalizedTypeName);
     }
   }
 
-  return uniqueStrings(names);
+  return {
+    mode,
+    includeSet,
+    excludeSet,
+    collectionContainers
+  };
+}
+
+function normalizeContainerNameSet(values) {
+  const normalized = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalizedValue = normalizeComparableToken(value);
+    if (normalizedValue) {
+      normalized.add(normalizedValue);
+    }
+  }
+  return normalized;
+}
+
+function shouldResolveSubtypeFromContainer(normalizedContainerName, policy) {
+  if (!normalizedContainerName || !policy) {
+    return false;
+  }
+
+  if (policy.mode === "never") {
+    return false;
+  }
+  if (policy.mode === "always") {
+    return true;
+  }
+  if (policy.mode === "exclude") {
+    return !policy.excludeSet.has(normalizedContainerName);
+  }
+
+  if (policy.includeSet.size > 0) {
+    return policy.includeSet.has(normalizedContainerName);
+  }
+  return policy.collectionContainers.has(normalizedContainerName);
 }
 
 function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
   const baseVariableToken = getVariableRootToken(variableToken);
   const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
   const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
+  const rootCollectionLike = Boolean(options.rootCollectionLike);
+  const subtypePolicy = options.subtypePolicy || getReturnSubtypeResolutionPolicy(index);
   const levels = [];
   let currentNodes = [
     {
@@ -2735,16 +3063,20 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
       const fields = collectDeclaredFieldsForTypes(node.typeNames, index).slice(0, maxFieldsPerType);
       for (const field of fields) {
         const segments = node.segments.concat(field.name);
-        const path = buildRobotAttributeAccessToken(baseVariableToken, segments);
-        if (path) {
-          levelPaths.push(path);
+        const paths = buildRobotAttributeAccessTokens(baseVariableToken, segments, {
+          includeRootIndexed: rootCollectionLike
+        });
+        if (paths.length > 0) {
+          levelPaths.push(...paths);
         }
 
         if (levelIndex >= maxDepth) {
           continue;
         }
 
-        const nestedTypeNames = extractIndexedTypeNamesFromAnnotation(field.annotation, index);
+        const nestedTypeNames = extractIndexedTypeNamesFromAnnotation(field.annotation, index, {
+          policy: subtypePolicy
+        });
         if (nestedTypeNames.length === 0) {
           continue;
         }
@@ -2779,6 +3111,31 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
 }
 
 function buildRobotAttributeAccessToken(baseVariableToken, segments) {
+  return buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
+    includeRootIndexed: false
+  });
+}
+
+function buildRobotAttributeAccessTokens(baseVariableToken, segments, options = {}) {
+  const tokens = [];
+  const directToken = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
+    includeRootIndexed: false
+  });
+  if (directToken) {
+    tokens.push(directToken);
+  }
+  if (options.includeRootIndexed) {
+    const indexedToken = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
+      includeRootIndexed: true
+    });
+    if (indexedToken) {
+      tokens.push(indexedToken);
+    }
+  }
+  return uniqueStrings(tokens);
+}
+
+function buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, options = {}) {
   const match = String(baseVariableToken || "").match(/^([@$&%])\{([^}\r\n]+)\}$/);
   if (!match) {
     return "";
@@ -2789,7 +3146,8 @@ function buildRobotAttributeAccessToken(baseVariableToken, segments) {
     return "";
   }
 
-  return `${match[1]}{${match[2]}.${normalizedSegments.join(".")}}`;
+  const rootBody = options.includeRootIndexed ? `${match[2]}[0]` : match[2];
+  return `${match[1]}{${rootBody}.${normalizedSegments.join(".")}}`;
 }
 
 function collectDeclaredFieldsForTypes(typeNames, index) {
@@ -3747,6 +4105,7 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
     pendingDecorators = [];
 
     const fields = [];
+    let hasIndexableMethod = false;
     let classBodyIndent = null;
     let inClassDocstring = false;
     let classDocstringDelimiter = "";
@@ -3796,6 +4155,9 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
         nextTrimmed.startsWith("async def ") ||
         nextTrimmed.startsWith("class ")
       ) {
+        if (/^(?:async\s+def|def)\s+(__getitem__|__iter__)\s*\(/.test(nextTrimmed)) {
+          hasIndexableMethod = true;
+        }
         continue;
       }
 
@@ -3830,6 +4192,7 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
       name: className,
       filePath,
       isDataclass,
+      isIndexableWrapper: hasIndexableMethod,
       baseTypeNames,
       fields: uniqueFields
     });
@@ -4922,6 +5285,33 @@ function getEnumHoverMaxMembers() {
     return 30;
   }
   return Math.max(5, Math.min(500, Math.round(raw)));
+}
+
+function getReturnSubtypeResolutionMode() {
+  const rawMode = String(getConfig().get("returnSubtypeResolutionMode", "always") || "always")
+    .trim()
+    .toLowerCase();
+  if (RETURN_SUBTYPE_RESOLUTION_MODES.has(rawMode)) {
+    return rawMode;
+  }
+  return "always";
+}
+
+function getReturnSubtypeIncludeContainers() {
+  return normalizeStringArrayConfigValue(getConfig().get("returnSubtypeIncludeContainers", []));
+}
+
+function getReturnSubtypeExcludeContainers() {
+  return normalizeStringArrayConfigValue(getConfig().get("returnSubtypeExcludeContainers", []));
+}
+
+function normalizeStringArrayConfigValue(rawValue) {
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+  return rawValue
+    .map((value) => String(value || "").trim())
+    .filter((value) => value.length > 0);
 }
 
 function getReturnHoverMaxDepth() {
