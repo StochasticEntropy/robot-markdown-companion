@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.26
+
+- Added typed variable dropdown suggestions for named argument values in Robot keyword calls.
+- Suggestions now prioritize in-scope variables assigned from keyword returns whose return type matches the expected argument type.
+- Added setting `robotDocPreview.enableTypedVariableCompletions` (default: `true`) to enable/disable these completion suggestions.
+
 ## 0.1.25
 
 - Improved enum hint readability for variable-driven arguments:

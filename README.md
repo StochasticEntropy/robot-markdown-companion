@@ -30,6 +30,7 @@ Read-only VS Code companion extension to render Robot Framework `[Documentation]
 - `robotDocPreview.enumHoverMaxEnums` (default: `6`)
 - `robotDocPreview.enumHoverMaxMembers` (default: `30`)
 - `robotDocPreview.enableVariableValueHover` (default: `true`)
+- `robotDocPreview.enableTypedVariableCompletions` (default: `true`)
 - `robotDocPreview.autoSyncSelection` (default: `true`)
 - `robotDocPreview.debounceMs` (default: `200`)
 - `robotDocPreview.hoverLineLimit` (default: `300`)

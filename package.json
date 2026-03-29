@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Read-only documentation preview plus variable/enum/typed return structure hovers for Robot Framework files.",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -139,6 +139,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show variable value hover when a local Set Variable assignment is found in the same test/keyword before the cursor."
+        },
+        "robotDocPreview.enableTypedVariableCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show type-matched local return-variable suggestions in named argument value positions (for example `${bp}` for `businesspartner=`)."
         },
         "robotDocPreview.enableReturnValueHover": {
           "type": "boolean",

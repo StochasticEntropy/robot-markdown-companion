@@ -89,6 +89,7 @@ function activate(context) {
   const returnPreviewProvider = new RobotReturnPreviewViewProvider();
   const returnController = new RobotReturnExplorerController(parser, enumHintService, returnPreviewProvider);
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
+  const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(parser, enumHintService);
 
   context.subscriptions.push(
     parser,
@@ -98,6 +99,7 @@ function activate(context) {
     returnPreviewProvider,
     returnController,
     codeLensProvider,
+    typedVariableCompletionProvider,
     vscode.window.registerWebviewViewProvider(VIEW_ID, previewProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
@@ -106,6 +108,16 @@ function activate(context) {
     }),
     vscode.languages.registerCodeLensProvider(ROBOT_SELECTOR, codeLensProvider),
     vscode.languages.registerHoverProvider(ROBOT_SELECTOR, new RobotDocHoverProvider(parser, enumHintService)),
+    vscode.languages.registerCompletionItemProvider(
+      ROBOT_SELECTOR,
+      typedVariableCompletionProvider,
+      "=",
+      "$",
+      "@",
+      "&",
+      "%",
+      "{"
+    ),
     vscode.commands.registerCommand(CMD_TOGGLE, () => controller.togglePreview()),
     vscode.commands.registerCommand(CMD_OPEN_CURRENT_BLOCK, () => controller.openCurrentBlock()),
     vscode.commands.registerCommand(CMD_OPEN_BLOCK_AT, (uriString, blockId) =>
@@ -573,6 +585,80 @@ class RobotDocHoverProvider {
     markdown.appendMarkdown(`\n\n[Open full rendered preview](command:${CMD_OPEN_BLOCK_AT}?${args})`);
 
     return new vscode.Hover(markdown, block.range);
+  }
+}
+
+class RobotTypedVariableCompletionProvider {
+  constructor(parser, enumHintService) {
+    this._parser = parser;
+    this._enumHintService = enumHintService;
+  }
+
+  async provideCompletionItems(document, position) {
+    if (!isRobotDocument(document) || !isTypedVariableCompletionsEnabled()) {
+      return undefined;
+    }
+
+    const parsed = this._parser.getParsed(document);
+    const argumentContext = getNamedArgumentValueContextAtPosition(document, position);
+    if (!argumentContext) {
+      return undefined;
+    }
+
+    if (!Number.isFinite(argumentContext.valueStart) || position.character < argumentContext.valueStart) {
+      return undefined;
+    }
+
+    const owner = findOwnerForLine(parsed.owners, position.line);
+    if (!owner) {
+      return undefined;
+    }
+
+    const index = await this._enumHintService.getIndexForDocument(document);
+    if (!index) {
+      return undefined;
+    }
+
+    const expectedTypeNames = resolveExpectedArgumentTypeNames(
+      index,
+      normalizeKeywordName(argumentContext.keywordName),
+      normalizeArgumentName(argumentContext.argumentName)
+    );
+    if (expectedTypeNames.size === 0) {
+      return undefined;
+    }
+
+    const matchingVariables = collectMatchingTypedReturnVariables(
+      parsed,
+      index,
+      owner,
+      position.line,
+      expectedTypeNames
+    );
+    if (matchingVariables.length === 0) {
+      return undefined;
+    }
+
+    const replaceStart = Math.max(0, Number(argumentContext.valueStart) || 0);
+    const replaceEnd = Math.max(replaceStart, Number(argumentContext.valueEnd) || replaceStart);
+    const replacementRange = new vscode.Range(position.line, replaceStart, position.line, replaceEnd);
+
+    const expectedTypeLabel = [...expectedTypeNames].slice(0, 3).join(" | ");
+    const items = matchingVariables.map((candidate) => {
+      const item = new vscode.CompletionItem(candidate.variableToken, vscode.CompletionItemKind.Variable);
+      item.textEdit = vscode.TextEdit.replace(replacementRange, candidate.variableToken);
+      item.detail = expectedTypeLabel
+        ? `Type-matched variable for ${argumentContext.argumentName} (${expectedTypeLabel})`
+        : `Type-matched variable for ${argumentContext.argumentName}`;
+      item.documentation = new vscode.MarkdownString(
+        `From keyword \`${candidate.keywordName}\` (line ${candidate.assignmentLine + 1})\n\n` +
+          `Return types: \`${candidate.typeNamesOriginal.join(" | ")}\``
+      );
+      item.sortText = `${String(999999 - candidate.assignmentLine).padStart(6, "0")}_${candidate.variableToken.toLowerCase()}`;
+      return item;
+    });
+
+    return new vscode.CompletionList(items, false);
   }
 }
 
@@ -3100,6 +3186,8 @@ function getNamedArgumentValueContextAtPosition(document, position) {
     keywordName,
     argumentName: namedArgument.name,
     argumentValue: namedArgument.value,
+    valueStart: namedArgument.valueStart,
+    valueEnd: namedArgument.valueEnd,
     hoverStart: namedArgument.hoverStart,
     hoverEnd: namedArgument.hoverEnd
   };
@@ -3214,6 +3302,8 @@ function findNamedArgumentAtPosition(lineText, character) {
     return {
       name,
       value: trimmedValue,
+      valueStart,
+      valueEnd,
       hoverStart: isOnName ? nameStart : valueStart,
       hoverEnd: isOnName ? nameEnd : valueEnd
     };
@@ -4105,6 +4195,110 @@ function normalizeComparableToken(value) {
     .replace(/[\s_-]+/g, "");
 }
 
+function extractComparableTypeNamesFromAnnotation(annotation) {
+  if (!annotation) {
+    return [];
+  }
+
+  const tokens = String(annotation).match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) || [];
+  const comparableNames = [];
+  for (const token of tokens) {
+    const normalizedToken = normalizeComparableToken(token);
+    if (!normalizedToken || PYTHON_IGNORED_TYPE_TOKENS.has(normalizedToken)) {
+      continue;
+    }
+    comparableNames.push(normalizedToken);
+  }
+
+  return uniqueStrings(comparableNames);
+}
+
+function resolveExpectedArgumentTypeNames(index, normalizedKeyword, normalizedArgument) {
+  const expectedTypeNames = new Set();
+  const annotations = index.keywordArgAnnotations?.get(normalizedKeyword)?.get(normalizedArgument) || [];
+  for (const annotation of annotations) {
+    for (const comparableTypeName of extractComparableTypeNamesFromAnnotation(annotation)) {
+      expectedTypeNames.add(comparableTypeName);
+    }
+  }
+
+  const enumNames = index.keywordArgs?.get(normalizedKeyword)?.get(normalizedArgument) || [];
+  for (const enumName of enumNames) {
+    const normalizedEnumName = normalizeComparableToken(enumName);
+    if (normalizedEnumName) {
+      expectedTypeNames.add(normalizedEnumName);
+    }
+  }
+
+  return expectedTypeNames;
+}
+
+function collectMatchingTypedReturnVariables(parsed, index, owner, line, expectedTypeNames) {
+  if (
+    !parsed ||
+    !index ||
+    !owner ||
+    !Number.isFinite(Number(line)) ||
+    !(expectedTypeNames instanceof Set) ||
+    expectedTypeNames.size === 0
+  ) {
+    return [];
+  }
+
+  const byVariable = new Map();
+  for (const assignment of parsed.keywordCallAssignments || []) {
+    if (assignment.ownerId !== owner.id || assignment.startLine > line) {
+      continue;
+    }
+
+    const normalizedKeyword = normalizeKeywordName(assignment.keywordName);
+    const returnAnnotation = String(index.keywordReturns?.get(normalizedKeyword) || "").trim();
+    if (!returnAnnotation) {
+      continue;
+    }
+
+    const comparableTypeNames = extractComparableTypeNamesFromAnnotation(returnAnnotation);
+    if (comparableTypeNames.length === 0) {
+      continue;
+    }
+
+    const matchesExpectedType = comparableTypeNames.some((typeName) => expectedTypeNames.has(typeName));
+    if (!matchesExpectedType) {
+      continue;
+    }
+
+    const returnVariables = assignment.returnVariables || [];
+    const normalizedReturnVariables = assignment.normalizedReturnVariables || [];
+    for (let indexOfVariable = 0; indexOfVariable < returnVariables.length; indexOfVariable += 1) {
+      const variableToken = String(returnVariables[indexOfVariable] || "").trim();
+      if (!variableToken) {
+        continue;
+      }
+
+      const normalizedVariable =
+        normalizedReturnVariables[indexOfVariable] || normalizeVariableLookupToken(variableToken);
+      const candidate = {
+        variableToken,
+        normalizedVariable,
+        assignmentLine: assignment.startLine,
+        keywordName: assignment.keywordName,
+        typeNamesOriginal: comparableTypeNames
+      };
+      const existing = byVariable.get(normalizedVariable);
+      if (!existing || candidate.assignmentLine > existing.assignmentLine) {
+        byVariable.set(normalizedVariable, candidate);
+      }
+    }
+  }
+
+  return [...byVariable.values()].sort((left, right) => {
+    if (left.assignmentLine !== right.assignmentLine) {
+      return right.assignmentLine - left.assignmentLine;
+    }
+    return left.variableToken.localeCompare(right.variableToken);
+  });
+}
+
 function uniqueStrings(values) {
   return [...new Set(values.filter(Boolean))];
 }
@@ -4315,6 +4509,10 @@ function isEnumArgumentFallbackEnabled() {
 
 function isVariableValueHoverEnabled() {
   return getConfig().get("enableVariableValueHover", true);
+}
+
+function isTypedVariableCompletionsEnabled() {
+  return getConfig().get("enableTypedVariableCompletions", true);
 }
 
 function isReturnValueHoverEnabled() {
