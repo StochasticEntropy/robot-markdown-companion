@@ -1,4 +1,4 @@
-# Robot Markdown Companion - Internal Notes
+# Robot Companion - Internal Notes
 
 This file is for development and publishing workflow notes.
 It is not included in the VSIX package because `package.json` uses a `files` whitelist that does not include this file.
@@ -9,7 +9,8 @@ It is not included in the VSIX package because `package.json` uses a `files` whi
    - `Toolbox/vscode/robot-markdown-companion`
 2. Press `F5` to launch an Extension Development Host.
 3. Open a `.robot` file in the Dev Host and use:
-   - `Robot Doc Preview: Open Current Documentation Block`
+   - `Robot Companion: Focus Return Explorer`
+   - `Robot Companion: Open Current Documentation Block`
 
 ## Publish
 

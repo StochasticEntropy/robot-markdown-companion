@@ -1,8 +1,8 @@
 {
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
-  "description": "Read-only documentation preview plus variable/enum/typed return structure hovers for Robot Framework files.",
-  "version": "0.1.34",
+  "description": "Robot Companion for Robot Framework: return/value/enum intelligence with synchronized documentation preview.",
+  "version": "0.2.0",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -37,6 +37,7 @@
   ],
   "files": [
     "extension.js",
+    "src/**",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
@@ -55,161 +56,161 @@
     "onStartupFinished",
     "workspaceContains:**/*.robot",
     "workspaceContains:**/*.resource",
-    "onCommand:robotDocPreview.toggle",
-    "onCommand:robotDocPreview.openCurrentBlock",
-    "onCommand:robotDocPreview.invalidateCaches",
-    "onView:robotDocPreview.view",
-    "onView:robotDocPreview.returnView"
+    "onCommand:robotCompanion.toggle",
+    "onCommand:robotCompanion.openCurrentBlock",
+    "onCommand:robotCompanion.invalidateCaches",
+    "onView:robotCompanion.view",
+    "onView:robotCompanion.returnView"
   ],
   "main": "./extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "robotDocPreviewContainer",
-          "title": "Robot Doc",
+          "id": "robotCompanionContainer",
+          "title": "Robot Companion",
           "icon": "media/robot-doc.svg"
         }
       ]
     },
     "commands": [
       {
-        "command": "robotDocPreview.toggle",
-        "title": "Robot Companion: Toggle Side Preview",
+        "command": "robotCompanion.toggle",
+        "title": "Robot Companion: Focus Return Explorer",
         "category": "Robot Companion"
       },
       {
-        "command": "robotDocPreview.openCurrentBlock",
+        "command": "robotCompanion.openCurrentBlock",
         "title": "Robot Companion: Open Current Documentation Block",
         "category": "Robot Companion"
       },
       {
-        "command": "robotDocPreview.invalidateCaches",
+        "command": "robotCompanion.invalidateCaches",
         "title": "Robot Companion: Invalidate All Caches",
         "category": "Robot Companion"
       }
     ],
     "views": {
-      "robotDocPreviewContainer": [
+      "robotCompanionContainer": [
         {
           "type": "webview",
-          "id": "robotDocPreview.view",
-          "name": "Robot Doc Preview"
+          "id": "robotCompanion.returnView",
+          "name": "Robot Return Explorer"
         },
         {
           "type": "webview",
-          "id": "robotDocPreview.returnView",
-          "name": "Robot Return Explorer"
+          "id": "robotCompanion.view",
+          "name": "Documentation Preview"
         }
       ]
     },
     "menus": {
       "editor/title": [
         {
-          "command": "robotDocPreview.openCurrentBlock",
+          "command": "robotCompanion.openCurrentBlock",
           "when": "resourceExtname == .robot || resourceExtname == .resource",
           "group": "navigation@50"
         }
       ]
     },
     "configuration": {
-      "title": "Robot Doc Preview",
+      "title": "Robot Companion",
       "properties": {
-        "robotDocPreview.enableCodeLens": {
+        "robotCompanion.enableCodeLens": {
           "type": "boolean",
           "default": true,
           "description": "Show CodeLens above each [Documentation] block to open rendered preview."
         },
-        "robotDocPreview.enableHoverPreview": {
+        "robotCompanion.enableHoverPreview": {
           "type": "boolean",
           "default": true,
           "description": "Show rendered documentation preview on hover within documentation lines."
         },
-        "robotDocPreview.enableEnumValueHover": {
+        "robotCompanion.enableEnumValueHover": {
           "type": "boolean",
           "default": true,
           "description": "Show enum value hints when hovering named argument values in Robot keyword calls."
         },
-        "robotDocPreview.enableEnumArgumentFallback": {
+        "robotCompanion.enableEnumArgumentFallback": {
           "type": "boolean",
           "default": false,
           "description": "Allow lower-confidence enum/type-hint fallback by argument name across keywords when no direct keyword argument mapping is found."
         },
-        "robotDocPreview.enableVariableValueHover": {
+        "robotCompanion.enableVariableValueHover": {
           "type": "boolean",
           "default": true,
           "description": "Show variable value hover when a local Set Variable assignment is found in the same test/keyword before the cursor."
         },
-        "robotDocPreview.enableTypedVariableCompletions": {
+        "robotCompanion.enableTypedVariableCompletions": {
           "type": "boolean",
           "default": true,
           "description": "Show type-matched local return-variable suggestions in named argument value positions (for example `${bp}` for `businesspartner=`)."
         },
-        "robotDocPreview.enableReturnValueHover": {
+        "robotCompanion.enableReturnValueHover": {
           "type": "boolean",
           "default": true,
           "description": "Show structured return hints when hovering a variable assigned from a keyword call."
         },
-        "robotDocPreview.enableReturnExplorer": {
+        "robotCompanion.enableReturnExplorer": {
           "type": "boolean",
           "default": true,
           "description": "Enable the Robot Return Explorer side view and keep it synced with the cursor."
         },
-        "robotDocPreview.autoSyncSelection": {
+        "robotCompanion.autoSyncSelection": {
           "type": "boolean",
           "default": true,
           "description": "Synchronize the side preview with the cursor position in active .robot files."
         },
-        "robotDocPreview.debounceMs": {
+        "robotCompanion.debounceMs": {
           "type": "number",
           "default": 200,
           "minimum": 0,
           "maximum": 5000,
           "description": "Debounce delay in milliseconds for reparsing documentation after edits."
         },
-        "robotDocPreview.hoverLineLimit": {
+        "robotCompanion.hoverLineLimit": {
           "type": "number",
           "default": 300,
           "minimum": 20,
           "maximum": 500,
           "description": "Maximum number of documentation lines shown inside hover preview before truncation."
         },
-        "robotDocPreview.enumHoverMaxEnums": {
+        "robotCompanion.enumHoverMaxEnums": {
           "type": "number",
           "default": 6,
           "minimum": 1,
           "maximum": 20,
           "description": "Maximum number of matching enum types shown in enum hover."
         },
-        "robotDocPreview.enumHoverMaxMembers": {
+        "robotCompanion.enumHoverMaxMembers": {
           "type": "number",
           "default": 30,
           "minimum": 5,
           "maximum": 500,
           "description": "Maximum number of enum members shown per enum in enum hover."
         },
-        "robotDocPreview.returnHoverMaxDepth": {
+        "robotCompanion.returnHoverMaxDepth": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 8,
           "description": "Maximum nested option depth shown in return hover (1 = top-level fields + one nested level)."
         },
-        "robotDocPreview.returnPreviewMaxDepth": {
+        "robotCompanion.returnPreviewMaxDepth": {
           "type": "number",
           "default": 1,
           "minimum": 0,
           "maximum": 12,
           "description": "Maximum nested option depth shown in the Robot Return Explorer side view."
         },
-        "robotDocPreview.returnHintArgumentMaxDepth": {
+        "robotCompanion.returnHintArgumentMaxDepth": {
           "type": "number",
           "default": 2,
           "minimum": 1,
           "maximum": 12,
           "description": "Maximum nested access depth shown in the 'Return Hint For Argument Value' section (hover + side panel)."
         },
-        "robotDocPreview.returnSubtypeResolutionMode": {
+        "robotCompanion.returnSubtypeResolutionMode": {
           "type": "string",
           "enum": [
             "always",
@@ -220,7 +221,7 @@
           "default": "always",
           "description": "How generic return subtypes are resolved (for example list[T], ListWrapper[T])."
         },
-        "robotDocPreview.returnSubtypeIncludeContainers": {
+        "robotCompanion.returnSubtypeIncludeContainers": {
           "type": "array",
           "items": {
             "type": "string"
@@ -228,7 +229,7 @@
           "default": [],
           "description": "Container names allowed for subtype resolution in 'include' mode (case-insensitive)."
         },
-        "robotDocPreview.returnSubtypeExcludeContainers": {
+        "robotCompanion.returnSubtypeExcludeContainers": {
           "type": "array",
           "items": {
             "type": "string"
@@ -236,28 +237,28 @@
           "default": [],
           "description": "Container names blocked for subtype resolution in 'exclude' mode (case-insensitive)."
         },
-        "robotDocPreview.returnMaxFieldsPerType": {
+        "robotCompanion.returnMaxFieldsPerType": {
           "type": "number",
           "default": 12,
           "minimum": 1,
           "maximum": 500,
           "description": "Maximum number of fields shown per return object type."
         },
-        "robotDocPreview.returnTechnicalMaxDepth": {
+        "robotCompanion.returnTechnicalMaxDepth": {
           "type": "number",
           "default": 5,
           "minimum": 0,
           "maximum": 12,
           "description": "Maximum nested depth shown in the technical (developer) section of return explorer."
         },
-        "robotDocPreview.returnTechnicalMaxFieldsPerType": {
+        "robotCompanion.returnTechnicalMaxFieldsPerType": {
           "type": "number",
           "default": 60,
           "minimum": 1,
           "maximum": 1000,
           "description": "Maximum fields shown per type in the technical (developer) section."
         },
-        "robotDocPreview.variableHoverLineLimit": {
+        "robotCompanion.variableHoverLineLimit": {
           "type": "number",
           "default": 30,
           "minimum": 1,

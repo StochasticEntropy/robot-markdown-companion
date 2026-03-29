@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- BREAKING: Renamed extension namespace from `robotDocPreview.*` to `robotCompanion.*` for commands, views/container IDs, and settings keys.
+- Re-positioned UX to make **Robot Return Explorer** the primary sidebar workflow; **Documentation Preview** remains available in the same container as a secondary capability.
+- Updated command palette labels for Robot Companion positioning (including `robotCompanion.toggle` -> focus Return Explorer).
+- Introduced `src/*` module layout scaffolding and moved runtime entrypoint to `src/core/extension.js` with root `extension.js` delegating to it.
+- Updated README and internal docs for the Robot Companion 0.2.0 naming and workflow model.
+
 ## 0.1.34
 
 - Improved nested collection access hints: when a second-level (or deeper) path goes through a collection-typed field, the path now inserts index access on that segment (for example `${bp.adresse[0].ort}`).
@@ -11,9 +19,9 @@
 ## 0.1.32
 
 - Added configurable generic subtype return resolution across return hover, side panel, and argument return hints:
-  - `robotDocPreview.returnSubtypeResolutionMode` (`always` | `never` | `include` | `exclude`, default `always`)
-  - `robotDocPreview.returnSubtypeIncludeContainers` (default `[]`)
-  - `robotDocPreview.returnSubtypeExcludeContainers` (default `[]`)
+  - `robotCompanion.returnSubtypeResolutionMode` (`always` | `never` | `include` | `exclude`, default `always`)
+  - `robotCompanion.returnSubtypeIncludeContainers` (default `[]`)
+  - `robotCompanion.returnSubtypeExcludeContainers` (default `[]`)
 - Return annotation parsing now resolves nested generic subtypes (for example `list[T]`, `ListWrapper[T]`, `Optional[list[T]]`) based on the selected policy.
 - Structured type indexing now marks indexable wrappers (`__getitem__` / `__iter__`) and uses that signal for include-mode subtype resolution.
 - Collection-like return hints now emit both access styles, including indexed Robot syntax `${var[0].field}`.
@@ -21,7 +29,7 @@
 ## 0.1.31
 
 - Added configurable depth for **Return Hint For Argument Value**:
-  - New setting: `robotDocPreview.returnHintArgumentMaxDepth` (default: `2`)
+  - New setting: `robotCompanion.returnHintArgumentMaxDepth` (default: `2`)
 - Return hint access path generation now respects that depth in both hover and side panel.
 
 ## 0.1.30
@@ -53,7 +61,7 @@
 
 - Added typed variable dropdown suggestions for named argument values in Robot keyword calls.
 - Suggestions now prioritize in-scope variables assigned from keyword returns whose return type matches the expected argument type.
-- Added setting `robotDocPreview.enableTypedVariableCompletions` (default: `true`) to enable/disable these completion suggestions.
+- Added setting `robotCompanion.enableTypedVariableCompletions` (default: `true`) to enable/disable these completion suggestions.
 
 ## 0.1.25
 
@@ -86,7 +94,7 @@
 
 ## 0.1.20
 
-- Added command `robotDocPreview.invalidateCaches` to clear all documentation/enum/return caches and refresh both side panels.
+- Added command `robotCompanion.invalidateCaches` to clear all documentation/enum/return caches and refresh both side panels.
 - Included the new cache command in extension contributions and README command list.
 
 ## 0.1.19
@@ -102,7 +110,7 @@
 
 ## 0.1.17
 
-- Added setting `robotDocPreview.enableEnumArgumentFallback` to control lower-confidence argument-name fallback across keywords.
+- Added setting `robotCompanion.enableEnumArgumentFallback` to control lower-confidence argument-name fallback across keywords.
 - Default for enum argument fallback is now off, so only direct keyword+argument enum/type-hint mappings are used unless explicitly enabled.
 
 ## 0.1.16
@@ -130,7 +138,7 @@
 
 - Return Explorer now shows a simple access-first view at the top and keeps full technical details below it for developers.
 - Return hover now favors the simple view and points users to the side panel for full technical depth.
-- Added technical depth/field settings: `robotDocPreview.returnTechnicalMaxDepth`, `robotDocPreview.returnTechnicalMaxFieldsPerType`.
+- Added technical depth/field settings: `robotCompanion.returnTechnicalMaxDepth`, `robotCompanion.returnTechnicalMaxFieldsPerType`.
 
 ## 0.1.11
 
@@ -170,9 +178,9 @@
 
 - Fixed hover regression where enum hover helpers were missing and could break all extension hover behavior.
 - Added enum hover settings back to extension configuration:
-  - `robotDocPreview.enableEnumValueHover`
-  - `robotDocPreview.enumHoverMaxEnums`
-  - `robotDocPreview.enumHoverMaxMembers`
+  - `robotCompanion.enableEnumValueHover`
+  - `robotCompanion.enumHoverMaxEnums`
+  - `robotCompanion.enumHoverMaxMembers`
 - Added enum hover error guardrails so enum failures no longer block variable/doc hover.
 
 ## 0.1.3
@@ -180,8 +188,8 @@
 - Added variable value hover enrichment for Robot variables (`${...}`, `@{...}`, `&{...}`, `%{...}`).
 - Variable hover now shows raw values from local `Set Variable` assignments in the same test/keyword before the cursor.
 - Added settings:
-  - `robotDocPreview.enableVariableValueHover`
-  - `robotDocPreview.variableHoverLineLimit`
+  - `robotCompanion.enableVariableValueHover`
+  - `robotCompanion.variableHoverLineLimit`
 - Extended command visibility to `.resource` files.
 
 ## 0.1.1

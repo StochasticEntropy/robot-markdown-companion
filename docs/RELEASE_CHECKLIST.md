@@ -13,10 +13,10 @@ Use this checklist before publishing a new Marketplace version.
 
 - Open a `.robot` file with RobotCode enabled.
 - Verify Command Palette commands are available:
-  - `Robot Companion: Toggle Side Preview`
+  - `Robot Companion: Focus Return Explorer`
   - `Robot Companion: Open Current Documentation Block`
   - `Robot Companion: Invalidate All Caches`
-- Confirm `Robot Doc Preview` and `Robot Return Explorer` side views load.
+- Confirm `Robot Return Explorer` and `Documentation Preview` side views load.
 
 ## 3. Documentation Preview Checks
 
