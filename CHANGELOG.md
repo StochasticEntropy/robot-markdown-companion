@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.30
+
+- Cleaned hover output by removing redundant "Return hint for argument value" when it duplicates the same `Set Variable` source already shown as `Value source`.
+- Aligned hover dedupe behavior with side-panel behavior for the same argument-resolution context.
+
 ## 0.1.29
 
 - Fixed Python keyword-signature parsing when inline `# ...` comments are present in parameter lines.

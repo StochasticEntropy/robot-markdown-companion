@@ -1788,20 +1788,7 @@ function buildEnumPreviewMarkdown(context) {
     lines.push("_No matching enum candidates found in indexed Python sources._");
   }
 
-  const returnHintSourceLine = Number(context.returnHintContext?.sourceLine);
-  const currentValueSourceLine = Number(context.currentValueSourceLine);
-  const returnHintKeywordName = String(context.returnHintContext?.assignment?.keywordName || "")
-    .trim()
-    .toLowerCase();
-  const isRedundantReturnHintSection =
-    Boolean(context.returnHintContext) &&
-    String(context.currentValueSource || "").toLowerCase() === "set-variable" &&
-    Number.isFinite(returnHintSourceLine) &&
-    returnHintSourceLine >= 0 &&
-    Number.isFinite(currentValueSourceLine) &&
-    currentValueSourceLine >= 0 &&
-    returnHintSourceLine === currentValueSourceLine &&
-    returnHintKeywordName === "set variable";
+  const isRedundantReturnHintSection = isRedundantReturnHint(context);
 
   if (context.returnHintContext && !isRedundantReturnHintSection) {
     lines.push("");
@@ -1846,6 +1833,24 @@ function buildEnumPreviewMarkdown(context) {
   }
 
   return lines.join("\n");
+}
+
+function isRedundantReturnHint(context) {
+  const returnHintSourceLine = Number(context?.returnHintContext?.sourceLine);
+  const currentValueSourceLine = Number(context?.currentValueSourceLine);
+  const returnHintKeywordName = String(context?.returnHintContext?.assignment?.keywordName || "")
+    .trim()
+    .toLowerCase();
+  return (
+    Boolean(context?.returnHintContext) &&
+    String(context?.currentValueSource || "").toLowerCase() === "set-variable" &&
+    Number.isFinite(returnHintSourceLine) &&
+    returnHintSourceLine >= 0 &&
+    Number.isFinite(currentValueSourceLine) &&
+    currentValueSourceLine >= 0 &&
+    returnHintSourceLine === currentValueSourceLine &&
+    returnHintKeywordName === "set variable"
+  );
 }
 
 function getEnumMatchProvenanceNote(context) {
@@ -3133,7 +3138,7 @@ async function createEnumValueHover(document, position, enumHintService, parsed)
     );
   }
 
-  if (context.returnHintContext) {
+  if (context.returnHintContext && !isRedundantReturnHint(context)) {
     markdown.appendMarkdown("\n\n**Return hint for argument value:**  \n");
     markdown.appendMarkdown("**Keyword:** ");
     markdown.appendText(context.returnHintContext.assignment.keywordName);
@@ -3148,7 +3153,12 @@ async function createEnumValueHover(document, position, enumHintService, parsed)
         context.returnHintContext.sourceUri || context.documentUri,
         sourceLine
       );
-      if (locationCommand) {
+      const shouldSuppressReturnHintJump =
+        String(context.currentValueSource || "").toLowerCase() === "set-variable" &&
+        Number.isFinite(Number(context.currentValueSourceLine)) &&
+        Number(context.currentValueSourceLine) >= 0 &&
+        sourceLine === Number(context.currentValueSourceLine);
+      if (locationCommand && !shouldSuppressReturnHintJump) {
         markdown.appendMarkdown(`  \n[Jump to assignment line ${sourceLineNumber}](${locationCommand})`);
       }
       markdown.appendMarkdown("\n\n");
