@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.31
+
+- Added configurable depth for **Return Hint For Argument Value**:
+  - New setting: `robotDocPreview.returnHintArgumentMaxDepth` (default: `2`)
+- Return hint access path generation now respects that depth in both hover and side panel.
+
 ## 0.1.30
 
 - Cleaned hover output by removing redundant "Return hint for argument value" when it duplicates the same `Set Variable` source already shown as `Value source`.

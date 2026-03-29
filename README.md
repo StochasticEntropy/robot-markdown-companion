@@ -34,6 +34,7 @@ Read-only VS Code companion extension to render Robot Framework `[Documentation]
 - `robotDocPreview.autoSyncSelection` (default: `true`)
 - `robotDocPreview.debounceMs` (default: `200`)
 - `robotDocPreview.hoverLineLimit` (default: `300`)
+- `robotDocPreview.returnHintArgumentMaxDepth` (default: `2`)
 - `robotDocPreview.variableHoverLineLimit` (default: `30`)
 
 ## Notes

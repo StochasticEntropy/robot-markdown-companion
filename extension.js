@@ -1818,15 +1818,23 @@ function buildEnumPreviewMarkdown(context) {
       lines.push(context.returnHintContext.returnAnnotation);
       lines.push("```");
     }
-    if (context.returnHintContext.simpleAccess?.firstLevel?.length > 0) {
-      const shownFirstLevel = context.returnHintContext.simpleAccess.firstLevel.slice(0, 12);
+    const returnHintAccessLevels = getSimpleAccessLevels(
+      context.returnHintContext.simpleAccess,
+      getReturnHintArgumentMaxDepth()
+    );
+    for (let levelIndex = 0; levelIndex < returnHintAccessLevels.length; levelIndex += 1) {
+      const levelPaths = returnHintAccessLevels[levelIndex];
+      const shownPaths = levelPaths.slice(0, 12);
       lines.push("");
+      lines.push(`**${formatAccessDepthLabel(levelIndex + 1)}:**`);
       lines.push("```robotframework");
-      lines.push(shownFirstLevel.join("\n"));
+      lines.push(shownPaths.join("\n"));
       lines.push("```");
-      if (context.returnHintContext.simpleAccess.firstLevel.length > shownFirstLevel.length) {
+      if (levelPaths.length > shownPaths.length) {
         lines.push(
-          `_Showing first ${shownFirstLevel.length} of ${context.returnHintContext.simpleAccess.firstLevel.length} first-level return paths._`
+          `_Showing first ${shownPaths.length} of ${levelPaths.length} ${formatAccessDepthLabel(
+            levelIndex + 1
+          ).toLowerCase()} paths._`
         );
       }
     }
@@ -1851,6 +1859,39 @@ function isRedundantReturnHint(context) {
     returnHintSourceLine === currentValueSourceLine &&
     returnHintKeywordName === "set variable"
   );
+}
+
+function getSimpleAccessLevels(simpleAccess, maxDepth = 2) {
+  const safeMaxDepth = Math.max(1, Math.min(12, Number(maxDepth) || 2));
+  if (Array.isArray(simpleAccess?.levels) && simpleAccess.levels.length > 0) {
+    return simpleAccess.levels
+      .slice(0, safeMaxDepth)
+      .map((level) => uniqueStrings((level || []).filter(Boolean)))
+      .filter((level) => level.length > 0);
+  }
+
+  const fallbackLevels = [];
+  if (Array.isArray(simpleAccess?.firstLevel) && simpleAccess.firstLevel.length > 0) {
+    fallbackLevels.push(uniqueStrings(simpleAccess.firstLevel));
+  }
+  if (Array.isArray(simpleAccess?.secondLevel) && simpleAccess.secondLevel.length > 0) {
+    fallbackLevels.push(uniqueStrings(simpleAccess.secondLevel));
+  }
+  return fallbackLevels.slice(0, safeMaxDepth);
+}
+
+function formatAccessDepthLabel(depth) {
+  const safeDepth = Math.max(1, Number(depth) || 1);
+  if (safeDepth === 1) {
+    return "First-level access";
+  }
+  if (safeDepth === 2) {
+    return "Second-level access";
+  }
+  if (safeDepth === 3) {
+    return "Third-level access";
+  }
+  return `${safeDepth}th-level access`;
 }
 
 function getEnumMatchProvenanceNote(context) {
@@ -2623,6 +2664,7 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
   const returnAnnotation = String(index.keywordReturns?.get(normalizedKeyword) || "").trim();
   const rootTypeNames = extractIndexedTypeNamesFromAnnotation(returnAnnotation, index);
   const simpleAccess = buildSimpleReturnAccessPaths(rawArgumentValue, rootTypeNames, index, {
+    maxDepth: getReturnHintArgumentMaxDepth(),
     maxFieldsPerType: getReturnMaxFieldsPerType()
   });
 
@@ -2676,33 +2718,63 @@ function extractIndexedTypeNamesFromAnnotation(annotation, index) {
 function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
   const baseVariableToken = getVariableRootToken(variableToken);
   const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
-  const firstLevelFields = collectDeclaredFieldsForTypes(rootTypeNames, index);
-  const firstLevelPaths = [];
-  for (const field of firstLevelFields.slice(0, maxFieldsPerType)) {
-    const path = buildRobotAttributeAccessToken(baseVariableToken, [field.name]);
-    if (path) {
-      firstLevelPaths.push(path);
+  const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
+  const levels = [];
+  let currentNodes = [
+    {
+      segments: [],
+      typeNames: uniqueStrings(rootTypeNames || [])
     }
-  }
+  ];
 
-  const secondLevelPaths = [];
-  for (const firstField of firstLevelFields.slice(0, maxFieldsPerType)) {
-    const nestedTypeNames = extractIndexedTypeNamesFromAnnotation(firstField.annotation, index);
-    if (nestedTypeNames.length === 0) {
-      continue;
-    }
-    const secondLevelFields = collectDeclaredFieldsForTypes(nestedTypeNames, index).slice(0, maxFieldsPerType);
-    for (const secondField of secondLevelFields) {
-      const path = buildRobotAttributeAccessToken(baseVariableToken, [firstField.name, secondField.name]);
-      if (path) {
-        secondLevelPaths.push(path);
+  for (let levelIndex = 1; levelIndex <= maxDepth && currentNodes.length > 0; levelIndex += 1) {
+    const levelPaths = [];
+    const nextNodesBySegments = new Map();
+
+    for (const node of currentNodes) {
+      const fields = collectDeclaredFieldsForTypes(node.typeNames, index).slice(0, maxFieldsPerType);
+      for (const field of fields) {
+        const segments = node.segments.concat(field.name);
+        const path = buildRobotAttributeAccessToken(baseVariableToken, segments);
+        if (path) {
+          levelPaths.push(path);
+        }
+
+        if (levelIndex >= maxDepth) {
+          continue;
+        }
+
+        const nestedTypeNames = extractIndexedTypeNamesFromAnnotation(field.annotation, index);
+        if (nestedTypeNames.length === 0) {
+          continue;
+        }
+
+        const segmentsKey = segments.join("\u0000");
+        let nextNode = nextNodesBySegments.get(segmentsKey);
+        if (!nextNode) {
+          nextNode = {
+            segments,
+            typeNames: new Set()
+          };
+          nextNodesBySegments.set(segmentsKey, nextNode);
+        }
+        for (const nestedTypeName of nestedTypeNames) {
+          nextNode.typeNames.add(nestedTypeName);
+        }
       }
     }
+
+    levels.push(uniqueStrings(levelPaths));
+    currentNodes = [...nextNodesBySegments.values()].map((node) => ({
+      segments: node.segments,
+      typeNames: [...node.typeNames]
+    }));
   }
 
   return {
-    firstLevel: uniqueStrings(firstLevelPaths),
-    secondLevel: uniqueStrings(secondLevelPaths)
+    firstLevel: levels[0] || [],
+    secondLevel: levels[1] || [],
+    levels
   };
 }
 
@@ -3171,14 +3243,20 @@ async function createEnumValueHover(document, position, enumHintService, parsed)
       markdown.appendCodeblock(context.returnHintContext.returnAnnotation, "python");
     }
 
-    const firstLevel = context.returnHintContext.simpleAccess?.firstLevel || [];
-    if (firstLevel.length > 0) {
-      const shownFirstLevel = firstLevel.slice(0, 12);
-      markdown.appendMarkdown("\n**First-level access:**\n");
-      markdown.appendCodeblock(shownFirstLevel.join("\n"), "robotframework");
-      if (firstLevel.length > shownFirstLevel.length) {
+    const returnHintAccessLevels = getSimpleAccessLevels(
+      context.returnHintContext.simpleAccess,
+      getReturnHintArgumentMaxDepth()
+    );
+    for (let levelIndex = 0; levelIndex < returnHintAccessLevels.length; levelIndex += 1) {
+      const levelPaths = returnHintAccessLevels[levelIndex];
+      const shownPaths = levelPaths.slice(0, 12);
+      markdown.appendMarkdown(`\n**${formatAccessDepthLabel(levelIndex + 1)}:**\n`);
+      markdown.appendCodeblock(shownPaths.join("\n"), "robotframework");
+      if (levelPaths.length > shownPaths.length) {
         markdown.appendMarkdown(
-          `\n_Showing first ${shownFirstLevel.length} of ${firstLevel.length} first-level return paths._`
+          `\n_Showing first ${shownPaths.length} of ${levelPaths.length} ${formatAccessDepthLabel(
+            levelIndex + 1
+          ).toLowerCase()} paths._`
         );
       }
     }
@@ -4860,6 +4938,14 @@ function getReturnPreviewMaxDepth() {
     return 1;
   }
   return Math.max(0, Math.min(12, Math.round(raw)));
+}
+
+function getReturnHintArgumentMaxDepth() {
+  const raw = Number(getConfig().get("returnHintArgumentMaxDepth", 2));
+  if (!Number.isFinite(raw)) {
+    return 2;
+  }
+  return Math.max(1, Math.min(12, Math.round(raw)));
 }
 
 function getReturnMaxFieldsPerType() {
