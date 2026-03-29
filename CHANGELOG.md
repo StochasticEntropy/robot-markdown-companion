@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.33
+
+- Collection-like return hints now show indexed access only (for example `${var[0].field}`), removing the duplicate non-indexed variant for those contexts.
+
 ## 0.1.32
 
 - Added configurable generic subtype return resolution across return hover, side panel, and argument return hints:

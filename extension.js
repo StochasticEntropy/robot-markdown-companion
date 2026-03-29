@@ -3063,11 +3063,11 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
       const fields = collectDeclaredFieldsForTypes(node.typeNames, index).slice(0, maxFieldsPerType);
       for (const field of fields) {
         const segments = node.segments.concat(field.name);
-        const paths = buildRobotAttributeAccessTokens(baseVariableToken, segments, {
+        const path = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
           includeRootIndexed: rootCollectionLike
         });
-        if (paths.length > 0) {
-          levelPaths.push(...paths);
+        if (path) {
+          levelPaths.push(path);
         }
 
         if (levelIndex >= maxDepth) {
@@ -3108,31 +3108,6 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
     secondLevel: levels[1] || [],
     levels
   };
-}
-
-function buildRobotAttributeAccessToken(baseVariableToken, segments) {
-  return buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
-    includeRootIndexed: false
-  });
-}
-
-function buildRobotAttributeAccessTokens(baseVariableToken, segments, options = {}) {
-  const tokens = [];
-  const directToken = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
-    includeRootIndexed: false
-  });
-  if (directToken) {
-    tokens.push(directToken);
-  }
-  if (options.includeRootIndexed) {
-    const indexedToken = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
-      includeRootIndexed: true
-    });
-    if (indexedToken) {
-      tokens.push(indexedToken);
-    }
-  }
-  return uniqueStrings(tokens);
 }
 
 function buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, options = {}) {
