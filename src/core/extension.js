@@ -269,6 +269,7 @@ class RobotDocumentationService {
         id,
         ownerName,
         ownerId: owner ? owner.id : "",
+        ownerStartLine: owner ? owner.startLine : lineIndex,
         section: currentSection,
         title,
         markdown,
@@ -753,12 +754,18 @@ class RobotDocPreviewViewProvider {
 
         const args = encodeURIComponent(JSON.stringify([this._state.documentUri, block.id]));
         const commandUri = `command:${CMD_OPEN_BLOCK_AT}?${args}`;
+        const testcaseCommand = buildOpenLocationCommandUri(
+          this._state.documentUri,
+          Number.isFinite(Number(block.ownerStartLine)) ? Number(block.ownerStartLine) : Number(block.startLine) || 0
+        );
         const isActive = selectedBlock && selectedBlock.id === block.id;
         const activeClass = isActive ? " active" : "";
 
-        return `<li class=\"list-item${activeClass}\"><a href=\"${commandUri}\">${escapeHtml(
+        return `<li class=\"list-item${activeClass}\"><div class=\"list-item-row\"><a href=\"${commandUri}\">${escapeHtml(
           block.ownerName || block.title
-        )}</a></li>`;
+        )}</a>${
+          testcaseCommand ? `<a class=\"testcase-jump\" href=\"${testcaseCommand}\">Jump to testcase</a>` : ""
+        }</div></li>`;
       })
       .join("\n");
 
@@ -780,11 +787,22 @@ class RobotDocPreviewViewProvider {
       ? `<ul class=\"list\">${blockItems}</ul>`
       : "<div class=\"muted\">No [Documentation] blocks found in Test Cases/Tasks/Keywords.</div>";
 
+    const selectedTestcaseJumpCommand =
+      selectedBlock && this._state.documentUri
+        ? buildOpenLocationCommandUri(
+            this._state.documentUri,
+            Number.isFinite(Number(selectedBlock.ownerStartLine))
+              ? Number(selectedBlock.ownerStartLine)
+              : Number(selectedBlock.startLine) || 0
+          )
+        : "";
     const previewTitle = selectedBlock
-      ? hasLeadingMarkdownHeading(selectedBlock.markdown)
-        ? ""
-        : `<h2 class="preview-title">${escapeHtml(selectedBlock.title)}</h2>`
+      ? `<h2 class=\"preview-title\">${escapeHtml(selectedBlock.ownerName || selectedBlock.title)}</h2>`
       : "<h2 class=\"preview-title\">Documentation Preview</h2>";
+    const previewSubtitle =
+      selectedBlock && selectedTestcaseJumpCommand
+        ? `<div class=\"preview-subtitle\"><a href=\"${selectedTestcaseJumpCommand}\">Jump to testcase</a></div>`
+        : "";
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -807,6 +825,17 @@ class RobotDocPreviewViewProvider {
     .preview-title {
       margin: 0 0 8px 0;
       font-size: 1.05em;
+    }
+    .preview-subtitle {
+      margin: 0 0 10px 0;
+      font-size: 0.9em;
+    }
+    .preview-subtitle a {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+    .preview-subtitle a:hover {
+      text-decoration: underline;
     }
     .file {
       font-weight: 600;
@@ -842,6 +871,13 @@ class RobotDocPreviewViewProvider {
       padding: 6px 8px;
       border-bottom: 1px solid var(--vscode-widget-border);
     }
+    .list-item-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
     .list-item:last-child {
       border-bottom: none;
     }
@@ -851,6 +887,11 @@ class RobotDocPreviewViewProvider {
     }
     .list-item a:hover {
       text-decoration: underline;
+    }
+    .list-item a.testcase-jump {
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.85em;
+      white-space: nowrap;
     }
     .list-item.active {
       background: color-mix(in srgb, var(--vscode-editor-background) 75%, var(--vscode-focusBorder));
@@ -911,6 +952,7 @@ class RobotDocPreviewViewProvider {
   ${listContent}
   <div class="preview">
     ${previewTitle}
+    ${previewSubtitle}
     ${renderedMarkdownHtml}
   </div>
   <script>

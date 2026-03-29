@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- Documentation Preview now shows testcase owner names as the primary list label and adds `Jump to testcase` links in the list.
+- Added a `Jump to testcase` link directly under the preview headline for the selected documentation block.
+- Preview headline now uses testcase name (`ownerName`) as the main title instead of derived markdown title.
+
 ## 0.2.3
 
 - Documentation Preview list now shows testcase owner names as the main item label (removed duplicated subtitle line in the list).
