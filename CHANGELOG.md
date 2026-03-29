@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Documentation Preview list now shows testcase owner names as the main item label (removed duplicated subtitle line in the list).
+
 ## 0.2.2
 
 - Changed default sidebar view order back to documentation-first: **Documentation Preview** on top, **Robot Return Explorer** below.

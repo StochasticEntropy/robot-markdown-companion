@@ -748,7 +748,7 @@ class RobotDocPreviewViewProvider {
     const blockItems = this._state.blocks
       .map((block) => {
         if (!this._state.documentUri) {
-          return `<li class=\"list-item\">${escapeHtml(block.title)}</li>`;
+          return `<li class=\"list-item\">${escapeHtml(block.ownerName || block.title)}</li>`;
         }
 
         const args = encodeURIComponent(JSON.stringify([this._state.documentUri, block.id]));
@@ -757,8 +757,8 @@ class RobotDocPreviewViewProvider {
         const activeClass = isActive ? " active" : "";
 
         return `<li class=\"list-item${activeClass}\"><a href=\"${commandUri}\">${escapeHtml(
-          block.title
-        )}</a><span class=\"owner\">${escapeHtml(block.ownerName)}</span></li>`;
+          block.ownerName || block.title
+        )}</a></li>`;
       })
       .join("\n");
 
