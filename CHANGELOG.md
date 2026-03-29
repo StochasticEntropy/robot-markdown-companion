@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Updated repository metadata URLs to `StochasticEntropy/robot-companion`.
+- Updated local `origin` remote recommendation in internal notes to the new repo naming.
+
 ## 0.2.0
 
 - BREAKING: Renamed extension namespace from `robotDocPreview.*` to `robotCompanion.*` for commands, views/container IDs, and settings keys.
