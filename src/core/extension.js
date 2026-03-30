@@ -982,13 +982,14 @@ function getReturnMemberCompletionContextAtPosition(document, position, argument
 
 function parseReturnMemberCompletionPrefix(valuePrefix, valueStart, cursorCharacter) {
   const source = String(valuePrefix || "");
-  const variablePrefixMatch = source.match(/^([@$&%])\{([^}\r\n]*)$/);
+  const variablePrefixMatch = source.match(/^([@$&%])\{([^}\r\n]*)(\})?$/);
   if (!variablePrefixMatch) {
     return undefined;
   }
 
   const sigil = String(variablePrefixMatch[1] || "").trim();
   const body = String(variablePrefixMatch[2] || "");
+  const hasClosingBrace = Boolean(variablePrefixMatch[3]);
   const firstDotIndex = body.indexOf(".");
   if (firstDotIndex <= 0) {
     return undefined;
@@ -1020,13 +1021,16 @@ function parseReturnMemberCompletionPrefix(valuePrefix, valueStart, cursorCharac
     completedSegments.push(parsedSegment);
   }
 
-  const replaceStart = Math.max(valueStart, cursorCharacter - activeRawSegment.length);
+  const replacementEnd = hasClosingBrace
+    ? Math.max(valueStart, cursorCharacter - 1)
+    : Math.max(valueStart, cursorCharacter);
+  const replaceStart = Math.max(valueStart, replacementEnd - activeRawSegment.length);
   return {
     rootVariableToken: `${sigil}{${rootVariableName}}`,
     completedSegments,
     activeSegment,
     replaceStart,
-    replaceEnd: cursorCharacter
+    replaceEnd: replacementEnd
   };
 }
 

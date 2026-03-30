@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.13
+
+- Fixed return-member autocomplete to also work when the Robot variable braces are already auto-closed by editor behavior:
+  - member completion now resolves for inputs like `${bp.}` in addition to `${bp.`.
+  - completion insertion now correctly inserts/replaces inside braces (before `}`) when cursor is after a closed variable token.
+
 ## 0.2.12
 
 - Added `${var.}` return-member autocomplete in named argument value contexts:
