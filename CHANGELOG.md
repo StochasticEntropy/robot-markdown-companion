@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Improved keyword-doc `Args` rendering for indented option lists: nested bullets and continuation lines now stay under the owning argument instead of flattening to top-level bullets.
+
 ## 0.2.5
 
 - Added keyword documentation rendering in **Robot Return Explorer** when cursor is on a keyword call token.

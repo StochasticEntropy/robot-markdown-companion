@@ -5184,9 +5184,12 @@ function normalizeKeywordDocstringToMarkdown(rawDocstring) {
   let hasArgsSection = false;
   let hasReturnsSection = false;
   let hasRaisesSection = false;
+  let argsBaseIndent = undefined;
+  let hasSeenArgsEntry = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
+    const lineIndent = getLeadingWhitespaceLength(line);
     const section = parseKeywordDocSectionHeader(trimmed);
     if (section) {
       if (seenSections.has(section)) {
@@ -5194,6 +5197,10 @@ function normalizeKeywordDocstringToMarkdown(rawDocstring) {
       }
       seenSections.add(section);
       currentSection = section;
+      if (section !== "Args") {
+        argsBaseIndent = undefined;
+        hasSeenArgsEntry = false;
+      }
       if (section === "Args") {
         hasArgsSection = true;
       } else if (section === "Returns") {
@@ -5218,17 +5225,34 @@ function normalizeKeywordDocstringToMarkdown(rawDocstring) {
       const argumentLine = parseGoogleStyleArgumentLine(trimmed);
       if (argumentLine) {
         parsedArgsEntries += 1;
+        hasSeenArgsEntry = true;
+        if (!Number.isFinite(Number(argsBaseIndent))) {
+          argsBaseIndent = lineIndent;
+        } else {
+          argsBaseIndent = Math.min(Number(argsBaseIndent), lineIndent);
+        }
         markdownLines.push(argumentLine);
         continue;
       }
 
       if (/^[-*]\s+/.test(trimmed)) {
-        markdownLines.push(trimmed);
+        const normalizedBullet = trimmed.replace(/^\*\s+/, "- ");
+        if (hasSeenArgsEntry) {
+          const nestedDepth = computeArgsNestedDepth(lineIndent, argsBaseIndent);
+          markdownLines.push(`${"  ".repeat(nestedDepth)}${normalizedBullet}`);
+        } else {
+          markdownLines.push(normalizedBullet);
+        }
         continue;
       }
 
       if (/^\s+/.test(line)) {
-        markdownLines.push(`  ${trimmed}`);
+        if (hasSeenArgsEntry) {
+          const nestedDepth = computeArgsNestedDepth(lineIndent, argsBaseIndent);
+          markdownLines.push(`${"  ".repeat(nestedDepth)}${trimmed}`);
+        } else {
+          markdownLines.push(trimmed);
+        }
         continue;
       }
 
@@ -5257,6 +5281,18 @@ function normalizeKeywordDocstringToMarkdown(rawDocstring) {
     markdown: collapseMarkdownBlankLines(markdownLines.join("\n")).trim(),
     warnings: uniqueStrings(warnings)
   };
+}
+
+function computeArgsNestedDepth(lineIndent, argsBaseIndent) {
+  const safeLineIndent = Math.max(0, Number(lineIndent) || 0);
+  const safeBaseIndent = Math.max(0, Number(argsBaseIndent) || 0);
+  if (safeLineIndent <= safeBaseIndent) {
+    return 1;
+  }
+
+  const relativeIndent = safeLineIndent - safeBaseIndent;
+  const depthFromIndent = Math.floor(relativeIndent / 4);
+  return Math.max(1, depthFromIndent);
 }
 
 function normalizeDocstringRawText(rawDocstring) {
