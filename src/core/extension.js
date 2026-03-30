@@ -181,6 +181,17 @@ function waitForEventLoop() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function getWorkspaceKeyForUri(uri) {
+  if (!uri) {
+    return "";
+  }
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (!workspaceFolder) {
+    return "";
+  }
+  return workspaceFolder.uri.toString();
+}
+
 function activate(context) {
   const parser = new RobotDocumentationService();
   const enumHintService = new RobotEnumHintService();
@@ -238,16 +249,31 @@ function activate(context) {
 
     pythonInvalidationTimer = setTimeout(async () => {
       pythonInvalidationTimer = undefined;
+      let didInvalidate = false;
       try {
-        if (pendingPythonFullInvalidate || pendingPythonInvalidateUris.size !== 1) {
-          enumHintService.invalidateAll();
+        if (pendingPythonFullInvalidate) {
+          enumHintService.invalidateAll({ skipRuntimeCacheClear: true });
+          didInvalidate = true;
         } else {
-          const [uriString] = [...pendingPythonInvalidateUris];
-          try {
-            enumHintService.invalidateForUri(vscode.Uri.parse(uriString));
-          } catch {
-            enumHintService.invalidateAll();
+          for (const uriString of pendingPythonInvalidateUris) {
+            try {
+              enumHintService.invalidateForUri(vscode.Uri.parse(uriString), {
+                skipRuntimeCacheClear: true
+              });
+              didInvalidate = true;
+            } catch {
+              pendingPythonFullInvalidate = true;
+              break;
+            }
           }
+          if (pendingPythonFullInvalidate) {
+            enumHintService.invalidateAll({ skipRuntimeCacheClear: true });
+            didInvalidate = true;
+          }
+        }
+
+        if (!didInvalidate) {
+          return;
         }
         clearRuntimeResolutionCaches();
         await prewarmIndexForOpenRobotDocuments(enumHintService);
@@ -379,13 +405,19 @@ function activate(context) {
       }
     }),
     vscode.workspace.onDidCreateFiles((event) => {
-      if (event.files.some((file) => isPythonPath(file.path))) {
-        schedulePythonIndexRefresh("full");
+      const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
+      if (pythonFiles.length > 0) {
+        for (const file of pythonFiles) {
+          schedulePythonIndexRefresh("uri", file);
+        }
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
-      if (event.files.some((file) => isPythonPath(file.path))) {
-        schedulePythonIndexRefresh("full");
+      const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
+      if (pythonFiles.length > 0) {
+        for (const file of pythonFiles) {
+          schedulePythonIndexRefresh("uri", file);
+        }
       }
     }),
     {
@@ -941,25 +973,59 @@ class RobotDocumentationService {
 class RobotEnumHintService {
   constructor() {
     this._indexByWorkspace = new Map();
+    this._workspaceSnapshots = new Map();
+    this._dirtyPythonUrisByWorkspace = new Map();
     this._generation = 0;
   }
 
   dispose() {
     this._indexByWorkspace.clear();
+    this._workspaceSnapshots.clear();
+    this._dirtyPythonUrisByWorkspace.clear();
   }
 
-  invalidateAll() {
+  invalidateAll(options = {}) {
     this._indexByWorkspace.clear();
-    clearRuntimeResolutionCaches();
+    this._workspaceSnapshots.clear();
+    this._dirtyPythonUrisByWorkspace.clear();
+    if (!options?.skipRuntimeCacheClear) {
+      clearRuntimeResolutionCaches();
+    }
   }
 
-  invalidateForUri(uri) {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-    if (!workspaceFolder) {
+  invalidateWorkspaceKey(workspaceKey, options = {}) {
+    const normalizedWorkspaceKey = String(workspaceKey || "").trim();
+    if (!normalizedWorkspaceKey) {
       return;
     }
-    this._indexByWorkspace.delete(workspaceFolder.uri.toString());
-    clearRuntimeResolutionCaches();
+    this._indexByWorkspace.delete(normalizedWorkspaceKey);
+    this._workspaceSnapshots.delete(normalizedWorkspaceKey);
+    this._dirtyPythonUrisByWorkspace.delete(normalizedWorkspaceKey);
+    if (!options?.skipRuntimeCacheClear) {
+      clearRuntimeResolutionCaches();
+    }
+  }
+
+  invalidateForUri(uri, options = {}) {
+    const workspaceKey = getWorkspaceKeyForUri(uri);
+    if (!workspaceKey) {
+      return;
+    }
+    const normalizedUri = String(uri?.toString?.() || "").trim();
+    if (!normalizedUri) {
+      this.invalidateWorkspaceKey(workspaceKey, options);
+      return;
+    }
+    let dirtyUris = this._dirtyPythonUrisByWorkspace.get(workspaceKey);
+    if (!dirtyUris) {
+      dirtyUris = new Set();
+      this._dirtyPythonUrisByWorkspace.set(workspaceKey, dirtyUris);
+    }
+    dirtyUris.add(normalizedUri);
+    this._indexByWorkspace.delete(workspaceKey);
+    if (!options?.skipRuntimeCacheClear) {
+      clearRuntimeResolutionCaches();
+    }
   }
 
   async getIndexForDocument(document) {
@@ -971,10 +1037,36 @@ class RobotEnumHintService {
     const key = workspaceFolder.uri.toString();
     const cached = this._indexByWorkspace.get(key);
     if (cached) {
-      return cached;
+      return await cached;
     }
 
-    const indexPromise = this._buildIndex(workspaceFolder);
+    const existingSnapshot = this._workspaceSnapshots.get(key);
+    const dirtyPythonUris = this._dirtyPythonUrisByWorkspace.get(key);
+    const shouldIncrementalBuild = Boolean(
+      existingSnapshot && dirtyPythonUris && dirtyPythonUris.size > 0
+    );
+
+    const indexPromise = (async () => {
+      try {
+        let buildResult;
+        if (shouldIncrementalBuild) {
+          buildResult = await this._buildIndexIncremental(workspaceFolder, existingSnapshot, dirtyPythonUris);
+        } else {
+          buildResult = await this._buildIndexFull(workspaceFolder);
+        }
+        this._workspaceSnapshots.set(key, buildResult.snapshot);
+        this._dirtyPythonUrisByWorkspace.delete(key);
+        return buildResult.index;
+      } catch (error) {
+        if (shouldIncrementalBuild) {
+          const fallbackResult = await this._buildIndexFull(workspaceFolder);
+          this._workspaceSnapshots.set(key, fallbackResult.snapshot);
+          this._dirtyPythonUrisByWorkspace.delete(key);
+          return fallbackResult.index;
+        }
+        throw error;
+      }
+    })();
     this._indexByWorkspace.set(key, indexPromise);
 
     try {
@@ -985,7 +1077,7 @@ class RobotEnumHintService {
     }
   }
 
-  async _buildIndex(workspaceFolder) {
+  async _buildIndexFull(workspaceFolder) {
     const importFolderPatterns = getIndexImportFolderPatterns();
     const excludeFolderPatterns = getIndexExcludeFolderPatterns();
     const includePatterns = buildIndexIncludeFilePatterns(importFolderPatterns, "**/*.py");
@@ -1001,9 +1093,157 @@ class RobotEnumHintService {
       findWorkspaceFilesByPatterns(workspaceFolder, keywordRobotIncludePatterns, excludePattern)
     ]);
 
-    const filteredFiles = pythonFiles;
-    const robotKeywordFiles = uniqueUrisByString(resourceFiles.concat(keywordRobotFiles));
+    const pythonContributionsByUri = new Map();
+    for (const fileUri of pythonFiles) {
+      const contribution = await this._parsePythonFileContribution(workspaceFolder, fileUri);
+      if (!contribution) {
+        continue;
+      }
+      pythonContributionsByUri.set(fileUri.toString(), contribution);
+    }
 
+    const robotKeywordContributionsByUri = new Map();
+    const robotKeywordFiles = uniqueUrisByString(resourceFiles.concat(keywordRobotFiles));
+    for (const fileUri of robotKeywordFiles) {
+      const contribution = await this._parseRobotKeywordFileContribution(fileUri);
+      if (!contribution) {
+        continue;
+      }
+      robotKeywordContributionsByUri.set(fileUri.toString(), contribution);
+    }
+
+    const index = this._composeIndexFromContributions(
+      pythonContributionsByUri,
+      robotKeywordContributionsByUri
+    );
+    return {
+      index,
+      snapshot: {
+        pythonContributionsByUri,
+        robotKeywordContributionsByUri
+      }
+    };
+  }
+
+  async _buildIndexIncremental(workspaceFolder, snapshot, dirtyPythonUris) {
+    if (!snapshot || !(snapshot.pythonContributionsByUri instanceof Map)) {
+      return this._buildIndexFull(workspaceFolder);
+    }
+
+    const pythonContributionsByUri = new Map(snapshot.pythonContributionsByUri);
+    const dirtyUris = new Set(
+      [...(dirtyPythonUris || [])]
+        .map((uri) => String(uri || "").trim())
+        .filter(Boolean)
+    );
+    for (const uriString of dirtyUris) {
+      let fileUri;
+      try {
+        fileUri = vscode.Uri.parse(uriString);
+      } catch {
+        return this._buildIndexFull(workspaceFolder);
+      }
+
+      if (!isPythonPath(fileUri.path)) {
+        continue;
+      }
+
+      const existingContribution = pythonContributionsByUri.get(uriString);
+      if (!existingContribution) {
+        return this._buildIndexFull(workspaceFolder);
+      }
+
+      const updatedContribution = await this._parsePythonFileContribution(workspaceFolder, fileUri);
+      if (!updatedContribution) {
+        pythonContributionsByUri.delete(uriString);
+        continue;
+      }
+      pythonContributionsByUri.set(uriString, updatedContribution);
+    }
+
+    const robotKeywordContributionsByUri =
+      snapshot.robotKeywordContributionsByUri instanceof Map
+        ? new Map(snapshot.robotKeywordContributionsByUri)
+        : new Map();
+    const index = this._composeIndexFromContributions(
+      pythonContributionsByUri,
+      robotKeywordContributionsByUri
+    );
+    return {
+      index,
+      snapshot: {
+        pythonContributionsByUri,
+        robotKeywordContributionsByUri
+      }
+    };
+  }
+
+  async _parsePythonFileContribution(workspaceFolder, fileUri) {
+    let fileContent = "";
+    try {
+      fileContent = await readWorkspaceText(fileUri);
+    } catch {
+      return undefined;
+    }
+
+    const filePath = fileUri.fsPath || fileUri.path;
+    const moduleInfo = derivePythonModuleInfo(workspaceFolder, fileUri);
+    const parsedImports = parsePythonImportAliasesFromSource(fileContent, moduleInfo.packagePath);
+    const enumDefinitions = parseEnumDefinitionsFromPythonSource(fileContent, filePath).map((enumDefinition) => {
+      const qualifiedName = moduleInfo.modulePath
+        ? `${moduleInfo.modulePath}.${enumDefinition.name}`
+        : enumDefinition.name;
+      return {
+        ...enumDefinition,
+        modulePath: moduleInfo.modulePath,
+        qualifiedName
+      };
+    });
+    const structuredTypeDefinitions = parseStructuredTypesFromPythonSource(fileContent, filePath).map(
+      (structuredTypeDefinition) => {
+        const qualifiedName = moduleInfo.modulePath
+          ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
+          : structuredTypeDefinition.name;
+        return {
+          ...structuredTypeDefinition,
+          modulePath: moduleInfo.modulePath,
+          qualifiedName
+        };
+      }
+    );
+    const keywordDefinitions = fileContent.includes("@keyword")
+      ? parseKeywordEnumHintsFromPythonSource(fileContent, filePath)
+      : [];
+
+    return {
+      filePath,
+      moduleInfo,
+      enumDefinitions,
+      structuredTypeDefinitions,
+      enumImportAliases: parseFromImportAliasesFromPythonSource(fileContent),
+      typeImportAliases: parsedImports.typeImportAliases,
+      moduleImportAliases: parsedImports.moduleImportAliases,
+      keywordDefinitions
+    };
+  }
+
+  async _parseRobotKeywordFileContribution(fileUri) {
+    let fileContent = "";
+    try {
+      fileContent = await readWorkspaceText(fileUri);
+    } catch {
+      return undefined;
+    }
+
+    if (!/\*{3}\s*keywords?\s*\*{3}/i.test(fileContent)) {
+      return undefined;
+    }
+    return {
+      keywordDefinitions: parseRobotKeywordDefinitionsFromSource(fileContent, fileUri.fsPath || fileUri.path)
+    };
+  }
+
+  _composeIndexFromContributions(pythonContributionsByUri, robotKeywordContributionsByUri) {
     const enumsByName = new Map();
     const enumsByQualifiedName = new Map();
     const structuredTypesByName = new Map();
@@ -1017,31 +1257,15 @@ class RobotEnumHintService {
     const keywordDefinitions = [];
     const robotKeywordDefinitions = [];
 
-    for (const fileUri of filteredFiles) {
-      let fileContent = "";
-      try {
-        fileContent = await readWorkspaceText(fileUri);
-      } catch {
+    for (const contribution of pythonContributionsByUri.values()) {
+      if (!contribution || !contribution.filePath) {
         continue;
       }
-
-      const filePath = fileUri.fsPath || fileUri.path;
-      const moduleInfo = derivePythonModuleInfo(workspaceFolder, fileUri);
+      const filePath = contribution.filePath;
+      const moduleInfo = contribution.moduleInfo || { modulePath: "", packagePath: "" };
       moduleInfoByFile.set(filePath, moduleInfo);
-      const parsedImports = parsePythonImportAliasesFromSource(fileContent, moduleInfo.packagePath);
-      typeImportAliasesByFile.set(filePath, parsedImports.typeImportAliases);
-      moduleImportAliasesByFile.set(filePath, parsedImports.moduleImportAliases);
 
-      const enumDefinitions = parseEnumDefinitionsFromPythonSource(fileContent, filePath).map((enumDefinition) => {
-        const qualifiedName = moduleInfo.modulePath
-          ? `${moduleInfo.modulePath}.${enumDefinition.name}`
-          : enumDefinition.name;
-        return {
-          ...enumDefinition,
-          modulePath: moduleInfo.modulePath,
-          qualifiedName
-        };
-      });
+      const enumDefinitions = Array.isArray(contribution.enumDefinitions) ? contribution.enumDefinitions : [];
       for (const enumDefinition of enumDefinitions) {
         const existing = enumsByName.get(enumDefinition.name) || [];
         existing.push(enumDefinition);
@@ -1054,20 +1278,13 @@ class RobotEnumHintService {
         filePath,
         new Set(enumDefinitions.map((enumDefinition) => enumDefinition.name))
       );
-      enumImportAliasesByFile.set(filePath, parseFromImportAliasesFromPythonSource(fileContent));
+      enumImportAliasesByFile.set(filePath, new Map(contribution.enumImportAliases || []));
+      typeImportAliasesByFile.set(filePath, cloneTypeImportAliasesMap(contribution.typeImportAliases));
+      moduleImportAliasesByFile.set(filePath, new Map(contribution.moduleImportAliases || []));
 
-      const structuredTypeDefinitions = parseStructuredTypesFromPythonSource(fileContent, filePath).map(
-        (structuredTypeDefinition) => {
-          const qualifiedName = moduleInfo.modulePath
-            ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
-            : structuredTypeDefinition.name;
-          return {
-            ...structuredTypeDefinition,
-            modulePath: moduleInfo.modulePath,
-            qualifiedName
-          };
-        }
-      );
+      const structuredTypeDefinitions = Array.isArray(contribution.structuredTypeDefinitions)
+        ? contribution.structuredTypeDefinitions
+        : [];
       for (const structuredTypeDefinition of structuredTypeDefinitions) {
         const existing = structuredTypesByName.get(structuredTypeDefinition.name) || [];
         existing.push(structuredTypeDefinition);
@@ -1081,26 +1298,14 @@ class RobotEnumHintService {
         new Set(structuredTypeDefinitions.map((structuredTypeDefinition) => structuredTypeDefinition.name))
       );
 
-      if (fileContent.includes("@keyword")) {
-        keywordDefinitions.push(...parseKeywordEnumHintsFromPythonSource(fileContent, filePath));
-      }
+      keywordDefinitions.push(...(contribution.keywordDefinitions || []));
     }
 
-    for (const fileUri of robotKeywordFiles) {
-      let fileContent = "";
-      try {
-        fileContent = await readWorkspaceText(fileUri);
-      } catch {
+    for (const contribution of robotKeywordContributionsByUri.values()) {
+      if (!contribution || !Array.isArray(contribution.keywordDefinitions)) {
         continue;
       }
-
-      if (!/\*{3}\s*keywords?\s*\*{3}/i.test(fileContent)) {
-        continue;
-      }
-
-      robotKeywordDefinitions.push(
-        ...parseRobotKeywordDefinitionsFromSource(fileContent, fileUri.fsPath || fileUri.path)
-      );
+      robotKeywordDefinitions.push(...contribution.keywordDefinitions);
     }
 
     const enumNameSet = new Set(enumsByName.keys());
