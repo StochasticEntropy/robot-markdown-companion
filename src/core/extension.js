@@ -160,6 +160,7 @@ function activate(context) {
     ),
     vscode.commands.registerCommand(CMD_OPEN_LOCATION, async (uriString, line, character = 0) => {
       await openTextDocumentAtLocation(uriString, line, character);
+      await returnController.refresh();
     }),
     vscode.commands.registerCommand(CMD_PREVIEW_KEYWORD_ARGUMENT, async (payload) => {
       await returnController.previewKeywordArgument(payload);
@@ -1572,6 +1573,7 @@ class RobotReturnExplorerController {
     this._enumHintService = enumHintService;
     this._previewProvider = previewProvider;
     this._syncSequence = 0;
+    this._suspendAutoSyncUntil = 0;
     this._debounceTimers = new Map();
     this._disposables = [];
 
@@ -1602,6 +1604,7 @@ class RobotReturnExplorerController {
   }
 
   async previewKeywordArgument(payload = {}) {
+    this._suspendAutoSyncUntil = Date.now() + 400;
     const uriString = String(payload?.documentUri || "").trim();
     const argumentName = String(payload?.argumentName || "").trim();
     if (!uriString || !argumentName) {
@@ -1670,6 +1673,7 @@ class RobotReturnExplorerController {
     }
 
     if (!enumContext) {
+      this._suspendAutoSyncUntil = Date.now() + 250;
       await this._syncFromActiveEditor(editor);
       return;
     }
@@ -1693,13 +1697,20 @@ class RobotReturnExplorerController {
       detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
       infoMessage: ""
     });
+    this._suspendAutoSyncUntil = Date.now() + 250;
   }
 
   _onActiveEditorChanged(editor) {
+    if (Date.now() < this._suspendAutoSyncUntil) {
+      return;
+    }
     void this._syncFromActiveEditor(editor);
   }
 
   _onSelectionChanged(event) {
+    if (Date.now() < this._suspendAutoSyncUntil) {
+      return;
+    }
     if (!isAutoSyncSelectionEnabled()) {
       return;
     }
