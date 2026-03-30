@@ -8,6 +8,14 @@
   - `Args` entries now link to the corresponding named argument in the current Robot keyword call when available.
   - Added a non-intrusive tip line explaining clickable argument names.
 - Added stable named-argument range extraction helper and reused it for hover/value detection and keyword-call argument parsing.
+- Keyword-doc argument links now work even when the argument is not present in the current call:
+  - clicking an `Args` entry opens an argument preview mode using keyword+argument mapping.
+  - when argument exists in the call, navigation still jumps to that argument location.
+- Added `Jump back to keyword` link in keyword-argument preview mode.
+- In keyword-argument preview mode, enum rendering is simplified:
+  - shows only argument name in the “What This Argument Accepts” block (no `arg=value` line),
+  - hides “Resolved current value …”,
+  - hides `<= current` enum member marker.
 
 ## 0.2.7
 

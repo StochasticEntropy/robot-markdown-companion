@@ -10,6 +10,7 @@ const CMD_OPEN_CURRENT_BLOCK = "robotCompanion.openCurrentBlock";
 const CMD_OPEN_BLOCK_AT = "robotCompanion.openBlockAt";
 const CMD_INVALIDATE_CACHES = "robotCompanion.invalidateCaches";
 const CMD_OPEN_LOCATION = "robotCompanion.openLocation";
+const CMD_PREVIEW_KEYWORD_ARGUMENT = "robotCompanion.previewKeywordArgument";
 
 const ROBOT_SELECTOR = [
   { language: "robotframework" },
@@ -159,6 +160,9 @@ function activate(context) {
     ),
     vscode.commands.registerCommand(CMD_OPEN_LOCATION, async (uriString, line, character = 0) => {
       await openTextDocumentAtLocation(uriString, line, character);
+    }),
+    vscode.commands.registerCommand(CMD_PREVIEW_KEYWORD_ARGUMENT, async (payload) => {
+      await returnController.previewKeywordArgument(payload);
     }),
     vscode.commands.registerCommand(CMD_INVALIDATE_CACHES, async () => {
       parser.clearAll();
@@ -1597,6 +1601,98 @@ class RobotReturnExplorerController {
     await this._syncFromActiveEditor();
   }
 
+  async previewKeywordArgument(payload = {}) {
+    const uriString = String(payload?.documentUri || "").trim();
+    const argumentName = String(payload?.argumentName || "").trim();
+    if (!uriString || !argumentName) {
+      return;
+    }
+
+    const preferredLine = Number.isFinite(Number(payload?.line))
+      ? Number(payload.line)
+      : Number.isFinite(Number(payload?.keywordLine))
+      ? Number(payload.keywordLine)
+      : 0;
+    const preferredCharacter = Number.isFinite(Number(payload?.character))
+      ? Number(payload.character)
+      : 0;
+
+    await openTextDocumentAtLocation(uriString, preferredLine, preferredCharacter);
+
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.toString() !== uriString || !isRobotDocument(editor.document)) {
+      return;
+    }
+
+    const parsed = this._parser.getParsed(editor.document);
+    const referenceLine = Number.isFinite(Number(payload?.line))
+      ? Number(payload.line)
+      : Number.isFinite(Number(payload?.keywordLine))
+      ? Number(payload.keywordLine)
+      : editor.selection.active.line;
+    const keywordName = String(payload?.keywordName || "").trim();
+    const argumentValue = String(payload?.argumentValue || "").trim();
+    const context = {
+      keywordName,
+      argumentName,
+      argumentValue,
+      valueStart: 0,
+      valueEnd: Math.max(0, argumentValue.length),
+      hoverStart: 0,
+      hoverEnd: Math.max(1, argumentName.length)
+    };
+    const backToKeywordCommandUri =
+      Number.isFinite(Number(payload?.keywordLine)) && Number(payload.keywordLine) >= 0
+        ? buildOpenLocationCommandUri(
+            uriString,
+            Number(payload.keywordLine),
+            Math.max(0, Number(payload?.keywordCharacter) || 0)
+          )
+        : "";
+
+    let enumContext = undefined;
+    try {
+      enumContext = await resolveEnumValuePreviewFromContext(editor.document, this._enumHintService, context, {
+        parsed,
+        referenceLine,
+        maxEnums: getEnumHoverMaxEnums(),
+        maxMembers: getEnumHoverMaxMembers(),
+        showArgumentAssignment: false,
+        showResolvedCurrentValue: false,
+        showCurrentMemberMarker: false,
+        backToKeywordCommandUri
+      });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn("[robot-companion] Keyword-doc argument preview failed:", message);
+    }
+
+    if (!enumContext) {
+      await this._syncFromActiveEditor(editor);
+      return;
+    }
+
+    const owner = findOwnerForLine(parsed.owners, referenceLine);
+    this._previewProvider.update({
+      contextKind: "enum",
+      documentUri: parsed.uri,
+      fileName: parsed.fileName,
+      ownerName: owner ? owner.name : "",
+      variableToken: enumContext.argumentName,
+      keywordName: enumContext.keywordName,
+      returnAnnotation: "",
+      currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
+      currentValueSource: enumContext.currentValueSource || "",
+      currentValueSourceLine: enumContext.currentValueSourceLine,
+      sourceUri: "",
+      sourceLine: undefined,
+      sourceFilePath: "",
+      sourceFunctionName: "",
+      detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
+      infoMessage: ""
+    });
+  }
+
   _onActiveEditorChanged(editor) {
     void this._syncFromActiveEditor(editor);
   }
@@ -1891,12 +1987,24 @@ function buildKeywordDocPreviewMarkdown(context) {
   if (context.primaryCandidate && context.primaryCandidate.normalizedDocstring) {
     const markdownWithArgumentLinks = injectKeywordDocArgumentNavigationLinks(
       context.primaryCandidate.normalizedDocstring,
-      context.callArgumentNavigationMap
+      {
+        callArgumentNavigationMap: context.callArgumentNavigationMap,
+        commandBuilder: ({ argumentName, normalizedArgumentName, target }) =>
+          buildPreviewKeywordArgumentCommandUri({
+            documentUri: context.documentUri,
+            keywordLine: context.keywordToken?.line,
+            keywordCharacter: context.keywordToken?.start,
+            keywordName: context.keywordToken?.keywordName || "",
+            argumentName,
+            normalizedArgumentName,
+            line: target?.line,
+            character: target?.character,
+            argumentValue: String(target?.argumentValue || "")
+          })
+      }
     );
-    if (context.callArgumentNavigationMap instanceof Map && context.callArgumentNavigationMap.size > 0) {
-      lines.push("_Tip: Click argument names in **Args** to jump to the current keyword call._");
-      lines.push("");
-    }
+    lines.push("_Tip: Click argument names in **Args** to preview that argument and jump to it when present._");
+    lines.push("");
     lines.push(markdownWithArgumentLinks);
   } else if (context.primaryCandidate && context.primaryCandidate.rawDocstring) {
     lines.push("#### Raw Docstring");
@@ -1947,8 +2055,12 @@ function buildKeywordDocPreviewMarkdown(context) {
   return lines.join("\n").trim();
 }
 
-function injectKeywordDocArgumentNavigationLinks(markdown, callArgumentNavigationMap) {
-  if (!(callArgumentNavigationMap instanceof Map) || callArgumentNavigationMap.size === 0) {
+function injectKeywordDocArgumentNavigationLinks(markdown, options = {}) {
+  const callArgumentNavigationMap =
+    options.callArgumentNavigationMap instanceof Map ? options.callArgumentNavigationMap : new Map();
+  const commandBuilder =
+    typeof options.commandBuilder === "function" ? options.commandBuilder : undefined;
+  if (!commandBuilder) {
     return String(markdown || "");
   }
 
@@ -1964,7 +2076,13 @@ function injectKeywordDocArgumentNavigationLinks(markdown, callArgumentNavigatio
     const suffix = String(match[3] || "");
     const normalizedArgument = normalizeArgumentName(argumentName);
     const target = callArgumentNavigationMap.get(normalizedArgument);
-    const commandUri = String(target?.commandUri || "");
+    const commandUri = String(
+      commandBuilder({
+        argumentName,
+        normalizedArgumentName: normalizedArgument,
+        target
+      }) || ""
+    );
     if (!commandUri) {
       return line;
     }
@@ -1999,7 +2117,7 @@ function buildNamedArgumentNavigationMapForKeywordCall(document, headerLine) {
         argumentName: namedArgument.name,
         line: lineIndex,
         character: namedArgument.nameStart,
-        commandUri: buildOpenLocationCommandUri(document.uri.toString(), lineIndex, namedArgument.nameStart)
+        argumentValue: String(namedArgument.value || "")
       });
     }
   }
@@ -2049,6 +2167,7 @@ async function resolveKeywordDocumentationPreview(document, parsed, position, en
   }
 
   return {
+    documentUri: parsed.uri,
     owner,
     keywordToken,
     normalizedKeyword,
@@ -2128,6 +2247,9 @@ function sortKeywordDocCandidates(candidates) {
 
 function buildEnumPreviewMarkdown(context) {
   const lines = [];
+  const showArgumentAssignment = context.showArgumentAssignment !== false;
+  const showResolvedCurrentValue = context.showResolvedCurrentValue !== false;
+  const showCurrentMemberMarker = context.showCurrentMemberMarker !== false;
   const currentValue = String(context.currentValue || context.argumentValue || "").trim();
   const argumentValue = String(context.argumentValue || "").trim();
   const normalizedCurrentValue = currentValue.toLowerCase();
@@ -2160,11 +2282,16 @@ function buildEnumPreviewMarkdown(context) {
   lines.push("### What This Argument Accepts");
   lines.push("");
   lines.push("```robotframework");
-  lines.push(`${context.argumentName}=${context.argumentValue}`);
+  lines.push(showArgumentAssignment ? `${context.argumentName}=${context.argumentValue}` : `${context.argumentName}`);
   lines.push("```");
   lines.push("");
 
-  if (currentValue.length > 0) {
+  if (context.backToKeywordCommandUri) {
+    lines.push(`[Jump back to keyword](${context.backToKeywordCommandUri})`);
+    lines.push("");
+  }
+
+  if (showResolvedCurrentValue && currentValue.length > 0) {
     if (argumentValue.length > 0 && argumentValue !== currentValue) {
       lines.push(`Resolved current value: \`${resolvedCurrentValueDisplay}\` (from \`${argumentValue}\`).`);
     } else {
@@ -2174,6 +2301,7 @@ function buildEnumPreviewMarkdown(context) {
   }
 
   if (
+    showResolvedCurrentValue &&
     context.currentValueSource === "set-variable" &&
     Number.isFinite(Number(context.currentValueSourceLine)) &&
     Number(context.currentValueSourceLine) >= 0
@@ -2220,7 +2348,10 @@ function buildEnumPreviewMarkdown(context) {
       lines.push(
         ...shownMembers.map((member) => {
           const display = formatEnumMemberForDisplay(member);
-          return isEnumMemberMatch(member, normalizedCurrentValue) ? `${display}  <= current` : display;
+          if (showCurrentMemberMarker && isEnumMemberMatch(member, normalizedCurrentValue)) {
+            return `${display}  <= current`;
+          }
+          return display;
         })
       );
     }
@@ -2231,7 +2362,7 @@ function buildEnumPreviewMarkdown(context) {
         `_Showing first ${shownMembers.length} of ${members.length} members for ${enumEntry.name}._`
       );
     }
-    if (!doesEnumContainValue(enumEntry, normalizedCurrentValue)) {
+    if (showResolvedCurrentValue && !doesEnumContainValue(enumEntry, normalizedCurrentValue)) {
       lines.push("_Current value is not an exact member match in this enum._");
     }
     lines.push("");
@@ -2249,7 +2380,7 @@ function buildEnumPreviewMarkdown(context) {
 
   const isRedundantReturnHintSection = isRedundantReturnHint(context);
 
-  if (context.returnHintContext && !isRedundantReturnHintSection) {
+  if (showResolvedCurrentValue && context.returnHintContext && !isRedundantReturnHintSection) {
     lines.push("");
     lines.push("### Return Hint For Argument Value");
     lines.push("");
@@ -4087,16 +4218,43 @@ async function resolveEnumValuePreview(document, position, enumHintService, opti
     return undefined;
   }
 
+  return resolveEnumValuePreviewFromContext(document, enumHintService, context, {
+    ...options,
+    referenceLine: position.line
+  });
+}
+
+async function resolveEnumValuePreviewFromContext(document, enumHintService, context, options = {}) {
+  if (!enumHintService || !context) {
+    return undefined;
+  }
+
   const parsed = options.parsed;
-  const currentValueResolution = resolveNamedArgumentCurrentValueFromSetVariable(context.argumentValue, parsed, position.line);
+  const referenceLine = Number.isFinite(Number(options.referenceLine))
+    ? Number(options.referenceLine)
+    : 0;
+  const shouldResolveCurrentValue = options.showResolvedCurrentValue !== false;
+  const currentValueResolution = shouldResolveCurrentValue
+    ? resolveNamedArgumentCurrentValueFromSetVariable(context.argumentValue, parsed, referenceLine)
+    : {
+        value: String(context.argumentValue || "").trim(),
+        source: "argument",
+        sourceLine: undefined
+      };
   const currentValue = currentValueResolution.value;
-  const returnHintContext = await resolveReturnHintForArgumentValue(
-    document,
-    parsed,
-    context,
-    position,
-    enumHintService
-  );
+  const returnHintContext =
+    shouldResolveCurrentValue && parsed
+      ? await resolveReturnHintForArgumentValue(
+          document,
+          parsed,
+          context,
+          {
+            line: referenceLine,
+            character: Math.max(0, Number(context.hoverStart) || 0)
+          },
+          enumHintService
+        )
+      : undefined;
 
   const index = await enumHintService.getIndexForDocument(document);
   if (!index) {
@@ -4195,6 +4353,10 @@ async function resolveEnumValuePreview(document, position, enumHintService, opti
     currentValue,
     currentValueSource: currentValueResolution.source,
     currentValueSourceLine: currentValueResolution.sourceLine,
+    showArgumentAssignment: options.showArgumentAssignment !== false,
+    showResolvedCurrentValue: options.showResolvedCurrentValue !== false,
+    showCurrentMemberMarker: options.showCurrentMemberMarker !== false,
+    backToKeywordCommandUri: String(options.backToKeywordCommandUri || ""),
     annotationHints,
     matchProvenance,
     duplicateCandidateCount,
@@ -4260,6 +4422,18 @@ function buildOpenLocationCommandUri(uriString, line, character = 0) {
   const safeCharacter = Math.max(0, Number(character) || 0);
   const args = encodeURIComponent(JSON.stringify([uriString, safeLine, safeCharacter]));
   return `command:${CMD_OPEN_LOCATION}?${args}`;
+}
+
+function buildPreviewKeywordArgumentCommandUri(payload) {
+  const uriString = String(payload?.documentUri || "").trim();
+  const keywordName = String(payload?.keywordName || "").trim();
+  const argumentName = String(payload?.argumentName || "").trim();
+  if (!uriString || !keywordName || !argumentName) {
+    return "";
+  }
+
+  const args = encodeURIComponent(JSON.stringify([payload]));
+  return `command:${CMD_PREVIEW_KEYWORD_ARGUMENT}?${args}`;
 }
 
 function buildEnumCandidateSignatureKey(enumEntry) {
