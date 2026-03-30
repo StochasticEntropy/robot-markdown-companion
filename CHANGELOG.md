@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.10
+
+- Improved cross-platform reliability for keyword-doc argument links in Return Explorer:
+  - argument links now route through `openLocation` with preview metadata, using the same navigation path as other working location links.
+  - fixed preview-command timing/race behavior so single-click argument navigation is more consistent.
+  - improved `Jump back to keyword` stability after argument preview transitions.
+
 ## 0.2.9
 
 - Fixed keyword-doc argument preview link reliability across environments:

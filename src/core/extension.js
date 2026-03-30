@@ -158,8 +158,15 @@ function activate(context) {
     vscode.commands.registerCommand(CMD_OPEN_BLOCK_AT, (uriString, blockId) =>
       controller.openBlockAt(uriString, blockId)
     ),
-    vscode.commands.registerCommand(CMD_OPEN_LOCATION, async (uriString, line, character = 0) => {
-      await openTextDocumentAtLocation(uriString, line, character);
+    vscode.commands.registerCommand(CMD_OPEN_LOCATION, async (uriString, line, character = 0, metadata) => {
+      const editor = await openTextDocumentAtLocation(uriString, line, character);
+      if (metadata && metadata.kind === "keywordArgumentPreview" && metadata.payload) {
+        await returnController.previewKeywordArgument(metadata.payload, {
+          skipOpen: true,
+          editor
+        });
+        return;
+      }
       await returnController.refresh();
     }),
     vscode.commands.registerCommand(CMD_PREVIEW_KEYWORD_ARGUMENT, async (payload) => {
@@ -1603,7 +1610,7 @@ class RobotReturnExplorerController {
     await this._syncFromActiveEditor();
   }
 
-  async previewKeywordArgument(payload = {}) {
+  async previewKeywordArgument(payload = {}, options = {}) {
     this._suspendAutoSyncUntil = Date.now() + 400;
     const uriString = String(payload?.documentUri || "").trim();
     const argumentName = String(payload?.argumentName || "").trim();
@@ -1622,9 +1629,13 @@ class RobotReturnExplorerController {
       ? Number(payload.keywordCharacter)
       : 0;
 
-    await openTextDocumentAtLocation(uriString, preferredLine, preferredCharacter);
-
-    const editor = vscode.window.activeTextEditor;
+    let editor = options.editor;
+    if (!options.skipOpen) {
+      editor = await openTextDocumentAtLocation(uriString, preferredLine, preferredCharacter);
+    }
+    if (!editor) {
+      editor = vscode.window.activeTextEditor;
+    }
     if (!editor || editor.document.uri.toString() !== uriString || !isRobotDocument(editor.document)) {
       return;
     }
@@ -4445,8 +4456,22 @@ function buildPreviewKeywordArgumentCommandUri(payload) {
     return "";
   }
 
-  const args = encodeURIComponent(JSON.stringify([payload]));
-  return `command:${CMD_PREVIEW_KEYWORD_ARGUMENT}?${args}`;
+  const safeLine = Number.isFinite(Number(payload?.line))
+    ? Math.max(0, Number(payload.line))
+    : Number.isFinite(Number(payload?.keywordLine))
+    ? Math.max(0, Number(payload.keywordLine))
+    : 0;
+  const safeCharacter = Number.isFinite(Number(payload?.character))
+    ? Math.max(0, Number(payload.character))
+    : Number.isFinite(Number(payload?.keywordCharacter))
+    ? Math.max(0, Number(payload.keywordCharacter))
+    : 0;
+  const metadata = {
+    kind: "keywordArgumentPreview",
+    payload
+  };
+  const args = encodeURIComponent(JSON.stringify([uriString, safeLine, safeCharacter, metadata]));
+  return `command:${CMD_OPEN_LOCATION}?${args}`;
 }
 
 function buildEnumCandidateSignatureKey(enumEntry) {
