@@ -12,9 +12,6 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
   - local `Set Variable` values,
   - named-argument enum/type hints,
   - keyword return structures.
-- Adds named-argument autocomplete helpers:
-  - type-matched local return-variable suggestions (for example `${bp}`),
-  - return-member suggestions while typing `${bp.}` (including index-aware members like `adresse[0]`).
 - Preserves RobotCode workflows because it does not replace the text editor or register formatter/diagnostic providers.
 
 ## Commands
@@ -36,13 +33,11 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
 - `robotCompanion.enableEnumArgumentFallback`
 - `robotCompanion.enableVariableValueHover`
 - `robotCompanion.enableTypedVariableCompletions`
-- `robotCompanion.enableReturnMemberCompletions`
 - `robotCompanion.enableReturnValueHover`
 - `robotCompanion.enableReturnExplorer`
 - `robotCompanion.indexImportFolderPatterns`
 - `robotCompanion.indexExcludeFolderPatterns`
 - `robotCompanion.autoSyncSelection`
-- `robotCompanion.typingUpdateMode`
 - `robotCompanion.debounceMs`
 - `robotCompanion.hoverLineLimit`
 - `robotCompanion.enumHoverMaxEnums`
@@ -67,7 +62,6 @@ Index pattern examples:
 
 - Extension behavior is read-only.
 - Caches (documentation + enum/type/return index) can be reset via the invalidate command.
-- `robotCompanion.typingUpdateMode` defaults to `fast` for cache-first typing feedback (side panel + `${var.}` completion), with a debounced full refresh for correction.
 - Keyword-doc view is best-effort: ambiguous matches or parse quirks show a warning banner, but content still renders.
 - Keyword-doc entries include jump links to Python keyword definitions when source locations are indexed.
 - Release verification guide: `docs/RELEASE_CHECKLIST.md`.

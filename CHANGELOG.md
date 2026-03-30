@@ -1,32 +1,5 @@
 # Changelog
 
-## 0.2.14
-
-- Improved typing-time performance for member completions and Return Explorer updates:
-  - added bounded in-memory runtime caches for return type resolution states and member path transitions.
-  - reused cached resolution across `${var.}` member completion requests to reduce repeated annotation/type traversal.
-- Improved Return Explorer responsiveness while editing named argument values:
-  - added enum-first fast-path sync for named-argument cursor context.
-  - added debounce-based parser refresh so side-panel reads can use a recent cached parse instead of reparsing on every keystroke.
-- Added cache invalidation guardrails:
-  - runtime resolution caches are now cleared together with index invalidation triggers and the `Invalidate All Caches` command.
-  - index objects now carry a generation marker used by cache keys to avoid stale cross-rebuild reuse.
-
-## 0.2.13
-
-- Fixed return-member autocomplete to also work when the Robot variable braces are already auto-closed by editor behavior:
-  - member completion now resolves for inputs like `${bp.}` in addition to `${bp.`.
-  - completion insertion now correctly inserts/replaces inside braces (before `}`) when cursor is after a closed variable token.
-
-## 0.2.12
-
-- Added `${var.}` return-member autocomplete in named argument value contexts:
-  - typing patterns like `${bp.` now suggest indexed return members (for example `business_partner_id`, `adresse[0]`).
-  - nested member completion works for indexed paths (for example `${bp.adresse[0].`).
-- Kept RobotCode compatibility by keeping completion scope limited to named argument values.
-- Added setting `robotCompanion.enableReturnMemberCompletions` (default `true`) to toggle member completion behavior independently.
-- Completion ranking updated so Robot Companion member results are prioritized in matching contexts.
-
 ## 0.2.11
 
 - Added import-aware return type resolution to reduce same-name type collisions across large codebases:

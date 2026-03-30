@@ -103,94 +103,6 @@ const BUILTIN_INDEXABLE_RETURN_CONTAINERS = new Set([
   "deque",
   "listwrapper"
 ]);
-const RETURN_TYPE_STATE_CACHE_MAX_ENTRIES = 4096;
-const RETURN_MEMBER_PATH_STATE_CACHE_MAX_ENTRIES = 16384;
-const RETURN_MEMBER_FIELDS_CACHE_MAX_ENTRIES = 8192;
-const RETURN_MEMBER_COMPLETION_CACHE_MAX_ENTRIES = 24576;
-const RETURN_PREVIEW_STATE_CACHE_MAX_ENTRIES = 4096;
-const RETURN_PREVIEW_HTML_CACHE_MAX_ENTRIES = 1024;
-const RETURN_SIMPLE_ACCESS_CACHE_MAX_ENTRIES = 8192;
-const PARSED_ASSIGNMENT_LOOKUP_CACHE_MAX_ENTRIES = 256;
-const RUNTIME_PREWARM_STATE_CACHE_MAX_ENTRIES = 512;
-const RUNTIME_PREWARM_DEFAULT_DELAY_MS = 420;
-const RUNTIME_PREWARM_BATCH_SIZE = 1;
-const RETURN_TYPE_STATE_CACHE = new Map();
-const RETURN_MEMBER_PATH_STATE_CACHE = new Map();
-const RETURN_MEMBER_FIELDS_CACHE = new Map();
-const RETURN_MEMBER_COMPLETION_CACHE = new Map();
-const RETURN_PREVIEW_STATE_CACHE = new Map();
-const RETURN_PREVIEW_HTML_CACHE = new Map();
-const RETURN_SIMPLE_ACCESS_CACHE = new Map();
-const PARSED_ASSIGNMENT_LOOKUP_CACHE = new Map();
-const RUNTIME_PREWARM_STATE_CACHE = new Map();
-const RUNTIME_PREWARM_IN_FLIGHT = new Map();
-const RUNTIME_PREWARM_QUEUE = new Map();
-let runtimePrewarmTimer = undefined;
-let runtimePrewarmLoopRunning = false;
-
-function setBoundedMapValue(map, key, value, maxEntries) {
-  if (!(map instanceof Map)) {
-    return;
-  }
-  if (map.has(key)) {
-    map.delete(key);
-  }
-  map.set(key, value);
-  const safeMaxEntries = Math.max(1, Number(maxEntries) || 1);
-  while (map.size > safeMaxEntries) {
-    const firstKey = map.keys().next().value;
-    map.delete(firstKey);
-  }
-}
-
-function removeMapEntriesByPrefix(map, prefix) {
-  if (!(map instanceof Map)) {
-    return;
-  }
-  const normalizedPrefix = String(prefix || "");
-  if (!normalizedPrefix) {
-    return;
-  }
-  for (const key of map.keys()) {
-    if (String(key).startsWith(normalizedPrefix)) {
-      map.delete(key);
-    }
-  }
-}
-
-function clearRuntimeResolutionCaches() {
-  RETURN_TYPE_STATE_CACHE.clear();
-  RETURN_MEMBER_PATH_STATE_CACHE.clear();
-  RETURN_MEMBER_FIELDS_CACHE.clear();
-  RETURN_MEMBER_COMPLETION_CACHE.clear();
-  RETURN_PREVIEW_STATE_CACHE.clear();
-  RETURN_PREVIEW_HTML_CACHE.clear();
-  RETURN_SIMPLE_ACCESS_CACHE.clear();
-  PARSED_ASSIGNMENT_LOOKUP_CACHE.clear();
-  RUNTIME_PREWARM_STATE_CACHE.clear();
-  RUNTIME_PREWARM_IN_FLIGHT.clear();
-  RUNTIME_PREWARM_QUEUE.clear();
-  if (runtimePrewarmTimer) {
-    clearTimeout(runtimePrewarmTimer);
-    runtimePrewarmTimer = undefined;
-  }
-  runtimePrewarmLoopRunning = false;
-}
-
-function waitForEventLoop() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function getWorkspaceKeyForUri(uri) {
-  if (!uri) {
-    return "";
-  }
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-  if (!workspaceFolder) {
-    return "";
-  }
-  return workspaceFolder.uri.toString();
-}
 
 function activate(context) {
   const parser = new RobotDocumentationService();
@@ -201,93 +113,6 @@ function activate(context) {
   const returnController = new RobotReturnExplorerController(parser, enumHintService, returnPreviewProvider);
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
   const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(parser, enumHintService);
-  let pythonInvalidationTimer = undefined;
-  const pendingPythonInvalidateUris = new Set();
-  let pendingPythonFullInvalidate = false;
-  const robotRuntimeInvalidationTimers = new Map();
-  const pendingRobotChangesByUri = new Map();
-
-  const scheduleRobotRuntimeCacheInvalidation = (document, contentChanges) => {
-    if (!isRobotDocument(document)) {
-      return;
-    }
-    const uriString = document.uri.toString();
-    if (!uriString) {
-      return;
-    }
-    const pendingChanges = pendingRobotChangesByUri.get(uriString) || [];
-    pendingChanges.push(...(Array.isArray(contentChanges) ? contentChanges : []));
-    pendingRobotChangesByUri.set(uriString, pendingChanges);
-
-    const existingTimer = robotRuntimeInvalidationTimers.get(uriString);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-    }
-
-    const delayMs = Math.max(80, Math.min(300, getDebounceMs()));
-    const timer = setTimeout(() => {
-      robotRuntimeInvalidationTimers.delete(uriString);
-      const mergedChanges = pendingRobotChangesByUri.get(uriString) || [];
-      pendingRobotChangesByUri.delete(uriString);
-      const currentDocument =
-        vscode.workspace.textDocuments.find((candidate) => candidate.uri.toString() === uriString) || document;
-      invalidateRuntimeCachesForRobotDocumentChange(parser, currentDocument, mergedChanges);
-    }, delayMs);
-    robotRuntimeInvalidationTimers.set(uriString, timer);
-  };
-
-  const schedulePythonIndexRefresh = (mode = "uri", uri) => {
-    if (mode === "full") {
-      pendingPythonFullInvalidate = true;
-    } else if (uri) {
-      pendingPythonInvalidateUris.add(uri.toString());
-    }
-
-    if (pythonInvalidationTimer) {
-      clearTimeout(pythonInvalidationTimer);
-    }
-
-    pythonInvalidationTimer = setTimeout(async () => {
-      pythonInvalidationTimer = undefined;
-      let didInvalidate = false;
-      try {
-        if (pendingPythonFullInvalidate) {
-          enumHintService.invalidateAll({ skipRuntimeCacheClear: true });
-          didInvalidate = true;
-        } else {
-          for (const uriString of pendingPythonInvalidateUris) {
-            try {
-              enumHintService.invalidateForUri(vscode.Uri.parse(uriString), {
-                skipRuntimeCacheClear: true
-              });
-              didInvalidate = true;
-            } catch {
-              pendingPythonFullInvalidate = true;
-              break;
-            }
-          }
-          if (pendingPythonFullInvalidate) {
-            enumHintService.invalidateAll({ skipRuntimeCacheClear: true });
-            didInvalidate = true;
-          }
-        }
-
-        if (!didInvalidate) {
-          return;
-        }
-        clearRuntimeResolutionCaches();
-        await prewarmIndexForOpenRobotDocuments(enumHintService);
-        void prewarmRuntimeCachesForOpenRobotDocuments(parser, enumHintService, {
-          deferred: true,
-          delayMs: 240
-        });
-        await returnController.refresh();
-      } finally {
-        pendingPythonInvalidateUris.clear();
-        pendingPythonFullInvalidate = false;
-      }
-    }, 800);
-  };
 
   context.subscriptions.push(
     parser,
@@ -314,8 +139,7 @@ function activate(context) {
       "@",
       "&",
       "%",
-      "{",
-      "."
+      "{"
     ),
     vscode.commands.registerCommand(CMD_TOGGLE, async () => {
       try {
@@ -351,49 +175,29 @@ function activate(context) {
     vscode.commands.registerCommand(CMD_INVALIDATE_CACHES, async () => {
       parser.clearAll();
       enumHintService.invalidateAll();
-      clearRuntimeResolutionCaches();
       codeLensProvider.refresh();
       controller.refresh();
-      await prewarmIndexForOpenRobotDocuments(enumHintService);
-      void prewarmRuntimeCachesForOpenRobotDocuments(parser, enumHintService, {
-        deferred: true,
-        delayMs: 220
-      });
+      const activeEditor = vscode.window.activeTextEditor;
+      if (activeEditor && isRobotDocument(activeEditor.document)) {
+        try {
+          await enumHintService.getIndexForDocument(activeEditor.document);
+        } catch {
+          // no-op
+        }
+      }
       await returnController.refresh();
       void vscode.window.showInformationMessage("Robot Companion caches invalidated.");
-    }),
-    vscode.workspace.onDidOpenTextDocument((document) => {
-      triggerIndexPrewarmForRobotDocument(enumHintService, document);
-      triggerRuntimeCachePrewarmForRobotDocument(parser, enumHintService, document);
-    }),
-    vscode.workspace.onDidChangeTextDocument((event) => {
-      scheduleRobotRuntimeCacheInvalidation(event.document, event.contentChanges);
-    }),
-    vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (!editor) {
-        return;
-      }
-      triggerIndexPrewarmForRobotDocument(enumHintService, editor.document);
-      triggerRuntimeCachePrewarmForRobotDocument(parser, enumHintService, editor.document);
     }),
     parser.onDidChange(() => codeLensProvider.refresh()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration(EXT_CONFIG_ROOT)) {
         return;
       }
-      const affectsIndexPatternSettings =
+      if (
         event.affectsConfiguration(`${EXT_CONFIG_ROOT}.indexImportFolderPatterns`) ||
-        event.affectsConfiguration(`${EXT_CONFIG_ROOT}.indexExcludeFolderPatterns`);
-      if (affectsIndexPatternSettings) {
+        event.affectsConfiguration(`${EXT_CONFIG_ROOT}.indexExcludeFolderPatterns`)
+      ) {
         enumHintService.invalidateAll();
-      }
-      clearRuntimeResolutionCaches();
-      if (affectsIndexPatternSettings) {
-        void prewarmIndexForOpenRobotDocuments(enumHintService);
-        void prewarmRuntimeCachesForOpenRobotDocuments(parser, enumHintService, {
-          deferred: true,
-          delayMs: 500
-        });
       }
       codeLensProvider.refresh();
       controller.refresh();
@@ -401,449 +205,24 @@ function activate(context) {
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (isPythonDocument(document)) {
-        schedulePythonIndexRefresh("uri", document.uri);
+        enumHintService.invalidateForUri(document.uri);
       }
     }),
     vscode.workspace.onDidCreateFiles((event) => {
-      const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
-      if (pythonFiles.length > 0) {
-        for (const file of pythonFiles) {
-          schedulePythonIndexRefresh("uri", file);
-        }
+      if (event.files.some((file) => isPythonPath(file.path))) {
+        enumHintService.invalidateAll();
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
-      const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
-      if (pythonFiles.length > 0) {
-        for (const file of pythonFiles) {
-          schedulePythonIndexRefresh("uri", file);
-        }
+      if (event.files.some((file) => isPythonPath(file.path))) {
+        enumHintService.invalidateAll();
       }
-    }),
-    {
-      dispose() {
-        if (pythonInvalidationTimer) {
-          clearTimeout(pythonInvalidationTimer);
-          pythonInvalidationTimer = undefined;
-        }
-        pendingPythonInvalidateUris.clear();
-        pendingPythonFullInvalidate = false;
-        for (const timer of robotRuntimeInvalidationTimers.values()) {
-          clearTimeout(timer);
-        }
-        robotRuntimeInvalidationTimers.clear();
-        pendingRobotChangesByUri.clear();
-      }
-    }
+    })
   );
-
-  void prewarmIndexForOpenRobotDocuments(enumHintService);
-  void prewarmRuntimeCachesForOpenRobotDocuments(parser, enumHintService, {
-    deferred: true,
-    delayMs: 850
-  });
 }
 
 function deactivate() {
   // no-op
-}
-
-function collectOpenRobotDocuments() {
-  const documentsByUri = new Map();
-  for (const editor of vscode.window.visibleTextEditors || []) {
-    const document = editor?.document;
-    if (!isRobotDocument(document)) {
-      continue;
-    }
-    documentsByUri.set(document.uri.toString(), document);
-  }
-  for (const document of vscode.workspace.textDocuments || []) {
-    if (!isRobotDocument(document)) {
-      continue;
-    }
-    documentsByUri.set(document.uri.toString(), document);
-  }
-  return [...documentsByUri.values()];
-}
-
-function triggerIndexPrewarmForRobotDocument(enumHintService, document) {
-  if (!enumHintService || !isRobotDocument(document)) {
-    return;
-  }
-  void enumHintService.getIndexForDocument(document).catch(() => undefined);
-}
-
-async function prewarmIndexForOpenRobotDocuments(enumHintService) {
-  const documents = collectOpenRobotDocuments();
-  if (documents.length === 0) {
-    return;
-  }
-  await Promise.all(
-    documents.map((document) => enumHintService.getIndexForDocument(document).catch(() => undefined))
-  );
-}
-
-function triggerRuntimeCachePrewarmForRobotDocument(parser, enumHintService, document) {
-  if (!parser || !enumHintService || !isRobotDocument(document)) {
-    return;
-  }
-  enqueueRuntimePrewarm(parser, enumHintService, document, RUNTIME_PREWARM_DEFAULT_DELAY_MS);
-}
-
-async function prewarmRuntimeCachesForOpenRobotDocuments(parser, enumHintService, options = {}) {
-  const documents = collectOpenRobotDocuments();
-  if (documents.length === 0) {
-    return;
-  }
-  const deferred = options.deferred !== false;
-  if (deferred) {
-    const delayMs = Math.max(0, Number(options.delayMs) || RUNTIME_PREWARM_DEFAULT_DELAY_MS);
-    for (const document of documents) {
-      enqueueRuntimePrewarm(parser, enumHintService, document, delayMs);
-    }
-    return;
-  }
-  for (const document of documents) {
-    await prewarmRuntimeCachesForRobotDocument(parser, enumHintService, document);
-  }
-}
-
-function enqueueRuntimePrewarm(parser, enumHintService, document, delayMs = RUNTIME_PREWARM_DEFAULT_DELAY_MS) {
-  if (!parser || !enumHintService || !isRobotDocument(document)) {
-    return;
-  }
-  const key = document.uri.toString();
-  RUNTIME_PREWARM_QUEUE.set(key, {
-    parser,
-    enumHintService,
-    documentUri: document.uri,
-    version: Number.isFinite(Number(document.version)) ? Number(document.version) : -1
-  });
-  scheduleRuntimePrewarmLoop(Math.max(0, Number(delayMs) || RUNTIME_PREWARM_DEFAULT_DELAY_MS));
-}
-
-function scheduleRuntimePrewarmLoop(delayMs = RUNTIME_PREWARM_DEFAULT_DELAY_MS) {
-  if (runtimePrewarmLoopRunning) {
-    return;
-  }
-  if (runtimePrewarmTimer) {
-    return;
-  }
-  runtimePrewarmTimer = setTimeout(() => {
-    runtimePrewarmTimer = undefined;
-    void runRuntimePrewarmLoop();
-  }, Math.max(0, Number(delayMs) || RUNTIME_PREWARM_DEFAULT_DELAY_MS));
-}
-
-async function runRuntimePrewarmLoop() {
-  if (runtimePrewarmLoopRunning) {
-    return;
-  }
-  runtimePrewarmLoopRunning = true;
-  try {
-    let processedCount = 0;
-    for (const [key, entry] of RUNTIME_PREWARM_QUEUE) {
-      RUNTIME_PREWARM_QUEUE.delete(key);
-      const currentDocument = vscode.workspace.textDocuments.find(
-        (candidate) => candidate.uri.toString() === key
-      );
-      if (!currentDocument || !isRobotDocument(currentDocument)) {
-        continue;
-      }
-      if (
-        Number.isFinite(Number(entry.version)) &&
-        Number(entry.version) >= 0 &&
-        Number(currentDocument.version) !== Number(entry.version)
-      ) {
-        enqueueRuntimePrewarm(entry.parser, entry.enumHintService, currentDocument, 90);
-        continue;
-      }
-      await waitForEventLoop();
-      await prewarmRuntimeCachesForRobotDocument(entry.parser, entry.enumHintService, currentDocument);
-      processedCount += 1;
-      if (processedCount >= RUNTIME_PREWARM_BATCH_SIZE) {
-        break;
-      }
-    }
-  } finally {
-    runtimePrewarmLoopRunning = false;
-  }
-  if (RUNTIME_PREWARM_QUEUE.size > 0) {
-    scheduleRuntimePrewarmLoop(70);
-  }
-}
-
-function collectAffectedOwnerIdsFromChanges(parsed, contentChanges) {
-  const ownerIds = new Set();
-  const owners = Array.isArray(parsed?.owners) ? parsed.owners : [];
-  if (owners.length === 0) {
-    return ownerIds;
-  }
-  for (const change of Array.isArray(contentChanges) ? contentChanges : []) {
-    const startLine = Number.isFinite(Number(change?.range?.start?.line))
-      ? Math.max(0, Number(change.range.start.line))
-      : 0;
-    const endLine = Number.isFinite(Number(change?.range?.end?.line))
-      ? Math.max(startLine, Number(change.range.end.line))
-      : startLine;
-    let matchedOwner = false;
-    for (const owner of owners) {
-      if (Number(owner?.endLine) < startLine || Number(owner?.startLine) > endLine) {
-        continue;
-      }
-      ownerIds.add(String(owner.id || ""));
-      matchedOwner = true;
-    }
-    if (!matchedOwner) {
-      const nearestOwner =
-        findOwnerForLine(owners, startLine) || findOwnerForLine(owners, Math.max(0, startLine - 1));
-      if (nearestOwner?.id) {
-        ownerIds.add(String(nearestOwner.id));
-      }
-    }
-  }
-  ownerIds.delete("");
-  return ownerIds;
-}
-
-function invalidateRuntimeCachesForRobotOwners(documentUri, ownerIds = new Set()) {
-  const normalizedDocumentUri = String(documentUri || "").trim();
-  if (!normalizedDocumentUri) {
-    return;
-  }
-  const uriPrefix = `${normalizedDocumentUri}|`;
-  removeMapEntriesByPrefix(RUNTIME_PREWARM_STATE_CACHE, uriPrefix);
-  removeMapEntriesByPrefix(PARSED_ASSIGNMENT_LOOKUP_CACHE, uriPrefix);
-
-  const normalizedOwnerIds = new Set(
-    [...(ownerIds || [])]
-      .map((ownerId) => String(ownerId || "").trim())
-      .filter(Boolean)
-  );
-
-  if (normalizedOwnerIds.size > 0) {
-    for (const ownerId of normalizedOwnerIds) {
-      removeMapEntriesByPrefix(RETURN_PREVIEW_STATE_CACHE, `namedarg|${normalizedDocumentUri}|${ownerId}|`);
-    }
-    const ownerTokens = [...normalizedOwnerIds].map((ownerId) => `|${normalizedDocumentUri}|${ownerId}|`);
-    for (const cacheKey of RETURN_MEMBER_COMPLETION_CACHE.keys()) {
-      const cacheKeyText = String(cacheKey || "");
-      if (ownerTokens.some((token) => cacheKeyText.includes(token))) {
-        RETURN_MEMBER_COMPLETION_CACHE.delete(cacheKey);
-      }
-    }
-    return;
-  }
-
-  removeMapEntriesByPrefix(RETURN_PREVIEW_STATE_CACHE, `namedarg|${normalizedDocumentUri}|`);
-  const documentToken = `|${normalizedDocumentUri}|`;
-  for (const cacheKey of RETURN_MEMBER_COMPLETION_CACHE.keys()) {
-    if (String(cacheKey || "").includes(documentToken)) {
-      RETURN_MEMBER_COMPLETION_CACHE.delete(cacheKey);
-    }
-  }
-}
-
-function invalidateRuntimeCachesForRobotDocumentChange(parser, document, contentChanges) {
-  if (!parser || !isRobotDocument(document)) {
-    return;
-  }
-  const documentUri = document.uri.toString();
-  if (!documentUri) {
-    return;
-  }
-  const parsedBeforeChange = parser.getCachedParsed(document, { allowStale: true });
-  if (!parsedBeforeChange || String(parsedBeforeChange.uri || "") !== documentUri) {
-    invalidateRuntimeCachesForRobotOwners(documentUri);
-    return;
-  }
-
-  const ownerIds = collectAffectedOwnerIdsFromChanges(parsedBeforeChange, contentChanges);
-  invalidateRuntimeCachesForRobotOwners(documentUri, ownerIds);
-}
-
-function collectLatestReturnVariableBindings(assignments) {
-  const latestByVariableKey = new Map();
-  for (const assignment of assignments || []) {
-    if (!assignment || !Array.isArray(assignment.normalizedReturnVariables) || !Array.isArray(assignment.returnVariables)) {
-      continue;
-    }
-    for (let index = 0; index < assignment.normalizedReturnVariables.length; index += 1) {
-      const normalizedVariable = normalizeVariableLookupToken(assignment.normalizedReturnVariables[index]);
-      const variableToken = String(assignment.returnVariables[index] || "").trim();
-      if (!normalizedVariable || !variableToken) {
-        continue;
-      }
-      const bindingKey = `${String(assignment.ownerId || "")}|${normalizedVariable}`;
-      latestByVariableKey.set(bindingKey, {
-        assignment,
-        variableToken,
-        normalizedVariable
-      });
-    }
-  }
-  return [...latestByVariableKey.values()];
-}
-
-async function prewarmRuntimeCachesForRobotDocument(parser, enumHintService, document) {
-  if (!parser || !enumHintService || !isRobotDocument(document)) {
-    return;
-  }
-
-  const parsed = parser.getCachedParsed(document, { allowStale: false });
-  if (!parsed) {
-    return;
-  }
-  // Warm owner/variable lookup tables and first-value extraction for Set Variable.
-  getParsedAssignmentLookup(parsed);
-
-  const index = await enumHintService.getIndexForDocument(document);
-  if (!index) {
-    return;
-  }
-
-  const prewarmStateKey = `${parsed.uri}|${
-    Number.isFinite(Number(parsed.version)) ? Number(parsed.version) : -1
-  }|${Number.isFinite(Number(index.generation)) ? Number(index.generation) : 0}`;
-  const prewarmStateUriPrefix = `${parsed.uri}|`;
-  if (RUNTIME_PREWARM_STATE_CACHE.has(prewarmStateKey)) {
-    return;
-  }
-  const existingPrewarmTask = RUNTIME_PREWARM_IN_FLIGHT.get(prewarmStateKey);
-  if (existingPrewarmTask) {
-    await existingPrewarmTask;
-    return;
-  }
-
-  const prewarmTask = (async () => {
-    const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
-    const maxFieldsPerType = getReturnMaxFieldsPerType();
-    const previewMaxDepth = getReturnPreviewMaxDepth();
-    const argumentHintMaxDepth = getReturnHintArgumentMaxDepth();
-    const latestBindings = collectLatestReturnVariableBindings(parsed.keywordCallAssignments);
-    if (latestBindings.length === 0) {
-      removeMapEntriesByPrefix(RUNTIME_PREWARM_STATE_CACHE, prewarmStateUriPrefix);
-      setBoundedMapValue(
-        RUNTIME_PREWARM_STATE_CACHE,
-        prewarmStateKey,
-        true,
-        RUNTIME_PREWARM_STATE_CACHE_MAX_ENTRIES
-      );
-      return;
-    }
-
-    const assignmentStateById = new Map();
-    for (let bindingIndex = 0; bindingIndex < latestBindings.length; bindingIndex += 1) {
-      const binding = latestBindings[bindingIndex];
-      const assignment = binding.assignment;
-      if (!assignment) {
-        continue;
-      }
-
-      let assignmentState = assignmentStateById.get(assignment.id);
-      if (!assignmentState) {
-        const normalizedKeyword = normalizeKeywordName(assignment.keywordName);
-        const returnDefinition = getKeywordReturnDefinition(index, normalizedKeyword);
-        const returnAnnotation = String(
-          returnDefinition?.returnAnnotation || index.keywordReturns?.get(normalizedKeyword) || ""
-        ).trim();
-        const returnTypeState = getCachedReturnTypeResolutionState(
-          index,
-          normalizedKeyword,
-          returnDefinition,
-          returnAnnotation,
-          subtypePolicy
-        );
-        const rootTypeNames = uniqueStrings(returnTypeState.typeNames || []);
-        const rootTypePreferences = cloneTypePreferenceMap(returnTypeState.typePreferencesByName);
-        const rootMemberFields = getCachedMemberFieldsForPath(
-          returnTypeState.cacheKey,
-          rootTypeNames,
-          rootTypePreferences,
-          index
-        );
-        const rootMemberSuggestions = buildMemberCompletionSuggestionsForFields(
-          rootMemberFields,
-          index,
-          subtypePolicy
-        );
-        assignmentState = {
-          normalizedKeyword,
-          returnDefinition,
-          returnAnnotation,
-          returnTypeState,
-          rootTypeNames,
-          rootTypePreferences,
-          rootMemberSuggestions
-        };
-        assignmentStateById.set(assignment.id, assignmentState);
-      }
-
-      if (!assignmentState || assignmentState.rootTypeNames.length === 0) {
-        continue;
-      }
-
-      const completionCacheKey = buildReturnMemberCompletionCacheKey(
-        index,
-        assignment,
-        binding.variableToken,
-        assignmentState.returnTypeState.cacheKey,
-        parsed.uri
-      );
-      if (
-        !RETURN_MEMBER_COMPLETION_CACHE.has(completionCacheKey) &&
-        assignmentState.rootMemberSuggestions.length > 0
-      ) {
-        setBoundedMapValue(
-          RETURN_MEMBER_COMPLETION_CACHE,
-          completionCacheKey,
-          assignmentState.rootMemberSuggestions,
-          RETURN_MEMBER_COMPLETION_CACHE_MAX_ENTRIES
-        );
-      }
-
-      getCachedSimpleReturnAccessPaths(binding.variableToken, assignmentState.rootTypeNames, index, {
-        rootCollectionLike: assignmentState.returnTypeState.hasCollectionSubtype,
-        subtypePolicy,
-        typePreferencesByName: assignmentState.returnTypeState.typePreferencesByName,
-        resolutionContext: assignmentState.returnTypeState.returnResolutionContext,
-        maxDepth: previewMaxDepth,
-        maxFieldsPerType,
-        returnTypeCacheKey: assignmentState.returnTypeState.cacheKey
-      });
-
-      if (argumentHintMaxDepth !== previewMaxDepth) {
-        getCachedSimpleReturnAccessPaths(binding.variableToken, assignmentState.rootTypeNames, index, {
-          rootCollectionLike: assignmentState.returnTypeState.hasCollectionSubtype,
-          subtypePolicy,
-          typePreferencesByName: assignmentState.returnTypeState.typePreferencesByName,
-          resolutionContext: assignmentState.returnTypeState.returnResolutionContext,
-          maxDepth: argumentHintMaxDepth,
-          maxFieldsPerType,
-          returnTypeCacheKey: assignmentState.returnTypeState.cacheKey
-        });
-      }
-
-      if ((bindingIndex + 1) % 24 === 0) {
-        await waitForEventLoop();
-      }
-    }
-
-    removeMapEntriesByPrefix(RUNTIME_PREWARM_STATE_CACHE, prewarmStateUriPrefix);
-    setBoundedMapValue(
-      RUNTIME_PREWARM_STATE_CACHE,
-      prewarmStateKey,
-      true,
-      RUNTIME_PREWARM_STATE_CACHE_MAX_ENTRIES
-    );
-  })();
-
-  RUNTIME_PREWARM_IN_FLIGHT.set(prewarmStateKey, prewarmTask);
-  try {
-    await prewarmTask;
-  } finally {
-    RUNTIME_PREWARM_IN_FLIGHT.delete(prewarmStateKey);
-  }
 }
 
 class RobotDocumentationService {
@@ -868,29 +247,16 @@ class RobotDocumentationService {
     this._onDidChangeEmitter.fire(undefined);
   }
 
-  getCachedParsed(document, options = {}) {
+  getParsed(document) {
     const key = document.uri.toString();
     const cached = this._cache.get(key);
-    const allowStale = Boolean(options?.allowStale);
-    if (cached && (cached.version === document.version || allowStale)) {
-      return cached;
-    }
-    return undefined;
-  }
-
-  getParsed(document, options = {}) {
-    const cached = this.getCachedParsed(document, options);
-    if (cached) {
+    if (cached && cached.version === document.version) {
       return cached;
     }
     return this.parse(document);
   }
 
   parse(document) {
-    const cached = this.getCachedParsed(document, { allowStale: false });
-    if (cached) {
-      return cached;
-    }
     const lines = document.getText().split(/\r?\n/);
     const { owners, ownerByLine } = buildOwnerScopes(lines);
     const blocks = [];
@@ -973,59 +339,22 @@ class RobotDocumentationService {
 class RobotEnumHintService {
   constructor() {
     this._indexByWorkspace = new Map();
-    this._workspaceSnapshots = new Map();
-    this._dirtyPythonUrisByWorkspace = new Map();
-    this._generation = 0;
   }
 
   dispose() {
     this._indexByWorkspace.clear();
-    this._workspaceSnapshots.clear();
-    this._dirtyPythonUrisByWorkspace.clear();
   }
 
-  invalidateAll(options = {}) {
+  invalidateAll() {
     this._indexByWorkspace.clear();
-    this._workspaceSnapshots.clear();
-    this._dirtyPythonUrisByWorkspace.clear();
-    if (!options?.skipRuntimeCacheClear) {
-      clearRuntimeResolutionCaches();
-    }
   }
 
-  invalidateWorkspaceKey(workspaceKey, options = {}) {
-    const normalizedWorkspaceKey = String(workspaceKey || "").trim();
-    if (!normalizedWorkspaceKey) {
+  invalidateForUri(uri) {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!workspaceFolder) {
       return;
     }
-    this._indexByWorkspace.delete(normalizedWorkspaceKey);
-    this._workspaceSnapshots.delete(normalizedWorkspaceKey);
-    this._dirtyPythonUrisByWorkspace.delete(normalizedWorkspaceKey);
-    if (!options?.skipRuntimeCacheClear) {
-      clearRuntimeResolutionCaches();
-    }
-  }
-
-  invalidateForUri(uri, options = {}) {
-    const workspaceKey = getWorkspaceKeyForUri(uri);
-    if (!workspaceKey) {
-      return;
-    }
-    const normalizedUri = String(uri?.toString?.() || "").trim();
-    if (!normalizedUri) {
-      this.invalidateWorkspaceKey(workspaceKey, options);
-      return;
-    }
-    let dirtyUris = this._dirtyPythonUrisByWorkspace.get(workspaceKey);
-    if (!dirtyUris) {
-      dirtyUris = new Set();
-      this._dirtyPythonUrisByWorkspace.set(workspaceKey, dirtyUris);
-    }
-    dirtyUris.add(normalizedUri);
-    this._indexByWorkspace.delete(workspaceKey);
-    if (!options?.skipRuntimeCacheClear) {
-      clearRuntimeResolutionCaches();
-    }
+    this._indexByWorkspace.delete(workspaceFolder.uri.toString());
   }
 
   async getIndexForDocument(document) {
@@ -1037,36 +366,10 @@ class RobotEnumHintService {
     const key = workspaceFolder.uri.toString();
     const cached = this._indexByWorkspace.get(key);
     if (cached) {
-      return await cached;
+      return cached;
     }
 
-    const existingSnapshot = this._workspaceSnapshots.get(key);
-    const dirtyPythonUris = this._dirtyPythonUrisByWorkspace.get(key);
-    const shouldIncrementalBuild = Boolean(
-      existingSnapshot && dirtyPythonUris && dirtyPythonUris.size > 0
-    );
-
-    const indexPromise = (async () => {
-      try {
-        let buildResult;
-        if (shouldIncrementalBuild) {
-          buildResult = await this._buildIndexIncremental(workspaceFolder, existingSnapshot, dirtyPythonUris);
-        } else {
-          buildResult = await this._buildIndexFull(workspaceFolder);
-        }
-        this._workspaceSnapshots.set(key, buildResult.snapshot);
-        this._dirtyPythonUrisByWorkspace.delete(key);
-        return buildResult.index;
-      } catch (error) {
-        if (shouldIncrementalBuild) {
-          const fallbackResult = await this._buildIndexFull(workspaceFolder);
-          this._workspaceSnapshots.set(key, fallbackResult.snapshot);
-          this._dirtyPythonUrisByWorkspace.delete(key);
-          return fallbackResult.index;
-        }
-        throw error;
-      }
-    })();
+    const indexPromise = this._buildIndex(workspaceFolder);
     this._indexByWorkspace.set(key, indexPromise);
 
     try {
@@ -1077,7 +380,7 @@ class RobotEnumHintService {
     }
   }
 
-  async _buildIndexFull(workspaceFolder) {
+  async _buildIndex(workspaceFolder) {
     const importFolderPatterns = getIndexImportFolderPatterns();
     const excludeFolderPatterns = getIndexExcludeFolderPatterns();
     const includePatterns = buildIndexIncludeFilePatterns(importFolderPatterns, "**/*.py");
@@ -1093,157 +396,9 @@ class RobotEnumHintService {
       findWorkspaceFilesByPatterns(workspaceFolder, keywordRobotIncludePatterns, excludePattern)
     ]);
 
-    const pythonContributionsByUri = new Map();
-    for (const fileUri of pythonFiles) {
-      const contribution = await this._parsePythonFileContribution(workspaceFolder, fileUri);
-      if (!contribution) {
-        continue;
-      }
-      pythonContributionsByUri.set(fileUri.toString(), contribution);
-    }
-
-    const robotKeywordContributionsByUri = new Map();
+    const filteredFiles = pythonFiles;
     const robotKeywordFiles = uniqueUrisByString(resourceFiles.concat(keywordRobotFiles));
-    for (const fileUri of robotKeywordFiles) {
-      const contribution = await this._parseRobotKeywordFileContribution(fileUri);
-      if (!contribution) {
-        continue;
-      }
-      robotKeywordContributionsByUri.set(fileUri.toString(), contribution);
-    }
 
-    const index = this._composeIndexFromContributions(
-      pythonContributionsByUri,
-      robotKeywordContributionsByUri
-    );
-    return {
-      index,
-      snapshot: {
-        pythonContributionsByUri,
-        robotKeywordContributionsByUri
-      }
-    };
-  }
-
-  async _buildIndexIncremental(workspaceFolder, snapshot, dirtyPythonUris) {
-    if (!snapshot || !(snapshot.pythonContributionsByUri instanceof Map)) {
-      return this._buildIndexFull(workspaceFolder);
-    }
-
-    const pythonContributionsByUri = new Map(snapshot.pythonContributionsByUri);
-    const dirtyUris = new Set(
-      [...(dirtyPythonUris || [])]
-        .map((uri) => String(uri || "").trim())
-        .filter(Boolean)
-    );
-    for (const uriString of dirtyUris) {
-      let fileUri;
-      try {
-        fileUri = vscode.Uri.parse(uriString);
-      } catch {
-        return this._buildIndexFull(workspaceFolder);
-      }
-
-      if (!isPythonPath(fileUri.path)) {
-        continue;
-      }
-
-      const existingContribution = pythonContributionsByUri.get(uriString);
-      if (!existingContribution) {
-        return this._buildIndexFull(workspaceFolder);
-      }
-
-      const updatedContribution = await this._parsePythonFileContribution(workspaceFolder, fileUri);
-      if (!updatedContribution) {
-        pythonContributionsByUri.delete(uriString);
-        continue;
-      }
-      pythonContributionsByUri.set(uriString, updatedContribution);
-    }
-
-    const robotKeywordContributionsByUri =
-      snapshot.robotKeywordContributionsByUri instanceof Map
-        ? new Map(snapshot.robotKeywordContributionsByUri)
-        : new Map();
-    const index = this._composeIndexFromContributions(
-      pythonContributionsByUri,
-      robotKeywordContributionsByUri
-    );
-    return {
-      index,
-      snapshot: {
-        pythonContributionsByUri,
-        robotKeywordContributionsByUri
-      }
-    };
-  }
-
-  async _parsePythonFileContribution(workspaceFolder, fileUri) {
-    let fileContent = "";
-    try {
-      fileContent = await readWorkspaceText(fileUri);
-    } catch {
-      return undefined;
-    }
-
-    const filePath = fileUri.fsPath || fileUri.path;
-    const moduleInfo = derivePythonModuleInfo(workspaceFolder, fileUri);
-    const parsedImports = parsePythonImportAliasesFromSource(fileContent, moduleInfo.packagePath);
-    const enumDefinitions = parseEnumDefinitionsFromPythonSource(fileContent, filePath).map((enumDefinition) => {
-      const qualifiedName = moduleInfo.modulePath
-        ? `${moduleInfo.modulePath}.${enumDefinition.name}`
-        : enumDefinition.name;
-      return {
-        ...enumDefinition,
-        modulePath: moduleInfo.modulePath,
-        qualifiedName
-      };
-    });
-    const structuredTypeDefinitions = parseStructuredTypesFromPythonSource(fileContent, filePath).map(
-      (structuredTypeDefinition) => {
-        const qualifiedName = moduleInfo.modulePath
-          ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
-          : structuredTypeDefinition.name;
-        return {
-          ...structuredTypeDefinition,
-          modulePath: moduleInfo.modulePath,
-          qualifiedName
-        };
-      }
-    );
-    const keywordDefinitions = fileContent.includes("@keyword")
-      ? parseKeywordEnumHintsFromPythonSource(fileContent, filePath)
-      : [];
-
-    return {
-      filePath,
-      moduleInfo,
-      enumDefinitions,
-      structuredTypeDefinitions,
-      enumImportAliases: parseFromImportAliasesFromPythonSource(fileContent),
-      typeImportAliases: parsedImports.typeImportAliases,
-      moduleImportAliases: parsedImports.moduleImportAliases,
-      keywordDefinitions
-    };
-  }
-
-  async _parseRobotKeywordFileContribution(fileUri) {
-    let fileContent = "";
-    try {
-      fileContent = await readWorkspaceText(fileUri);
-    } catch {
-      return undefined;
-    }
-
-    if (!/\*{3}\s*keywords?\s*\*{3}/i.test(fileContent)) {
-      return undefined;
-    }
-    return {
-      keywordDefinitions: parseRobotKeywordDefinitionsFromSource(fileContent, fileUri.fsPath || fileUri.path)
-    };
-  }
-
-  _composeIndexFromContributions(pythonContributionsByUri, robotKeywordContributionsByUri) {
     const enumsByName = new Map();
     const enumsByQualifiedName = new Map();
     const structuredTypesByName = new Map();
@@ -1257,15 +412,31 @@ class RobotEnumHintService {
     const keywordDefinitions = [];
     const robotKeywordDefinitions = [];
 
-    for (const contribution of pythonContributionsByUri.values()) {
-      if (!contribution || !contribution.filePath) {
+    for (const fileUri of filteredFiles) {
+      let fileContent = "";
+      try {
+        fileContent = await readWorkspaceText(fileUri);
+      } catch {
         continue;
       }
-      const filePath = contribution.filePath;
-      const moduleInfo = contribution.moduleInfo || { modulePath: "", packagePath: "" };
-      moduleInfoByFile.set(filePath, moduleInfo);
 
-      const enumDefinitions = Array.isArray(contribution.enumDefinitions) ? contribution.enumDefinitions : [];
+      const filePath = fileUri.fsPath || fileUri.path;
+      const moduleInfo = derivePythonModuleInfo(workspaceFolder, fileUri);
+      moduleInfoByFile.set(filePath, moduleInfo);
+      const parsedImports = parsePythonImportAliasesFromSource(fileContent, moduleInfo.packagePath);
+      typeImportAliasesByFile.set(filePath, parsedImports.typeImportAliases);
+      moduleImportAliasesByFile.set(filePath, parsedImports.moduleImportAliases);
+
+      const enumDefinitions = parseEnumDefinitionsFromPythonSource(fileContent, filePath).map((enumDefinition) => {
+        const qualifiedName = moduleInfo.modulePath
+          ? `${moduleInfo.modulePath}.${enumDefinition.name}`
+          : enumDefinition.name;
+        return {
+          ...enumDefinition,
+          modulePath: moduleInfo.modulePath,
+          qualifiedName
+        };
+      });
       for (const enumDefinition of enumDefinitions) {
         const existing = enumsByName.get(enumDefinition.name) || [];
         existing.push(enumDefinition);
@@ -1278,13 +449,20 @@ class RobotEnumHintService {
         filePath,
         new Set(enumDefinitions.map((enumDefinition) => enumDefinition.name))
       );
-      enumImportAliasesByFile.set(filePath, new Map(contribution.enumImportAliases || []));
-      typeImportAliasesByFile.set(filePath, cloneTypeImportAliasesMap(contribution.typeImportAliases));
-      moduleImportAliasesByFile.set(filePath, new Map(contribution.moduleImportAliases || []));
+      enumImportAliasesByFile.set(filePath, parseFromImportAliasesFromPythonSource(fileContent));
 
-      const structuredTypeDefinitions = Array.isArray(contribution.structuredTypeDefinitions)
-        ? contribution.structuredTypeDefinitions
-        : [];
+      const structuredTypeDefinitions = parseStructuredTypesFromPythonSource(fileContent, filePath).map(
+        (structuredTypeDefinition) => {
+          const qualifiedName = moduleInfo.modulePath
+            ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
+            : structuredTypeDefinition.name;
+          return {
+            ...structuredTypeDefinition,
+            modulePath: moduleInfo.modulePath,
+            qualifiedName
+          };
+        }
+      );
       for (const structuredTypeDefinition of structuredTypeDefinitions) {
         const existing = structuredTypesByName.get(structuredTypeDefinition.name) || [];
         existing.push(structuredTypeDefinition);
@@ -1298,14 +476,26 @@ class RobotEnumHintService {
         new Set(structuredTypeDefinitions.map((structuredTypeDefinition) => structuredTypeDefinition.name))
       );
 
-      keywordDefinitions.push(...(contribution.keywordDefinitions || []));
+      if (fileContent.includes("@keyword")) {
+        keywordDefinitions.push(...parseKeywordEnumHintsFromPythonSource(fileContent, filePath));
+      }
     }
 
-    for (const contribution of robotKeywordContributionsByUri.values()) {
-      if (!contribution || !Array.isArray(contribution.keywordDefinitions)) {
+    for (const fileUri of robotKeywordFiles) {
+      let fileContent = "";
+      try {
+        fileContent = await readWorkspaceText(fileUri);
+      } catch {
         continue;
       }
-      robotKeywordDefinitions.push(...contribution.keywordDefinitions);
+
+      if (!/\*{3}\s*keywords?\s*\*{3}/i.test(fileContent)) {
+        continue;
+      }
+
+      robotKeywordDefinitions.push(
+        ...parseRobotKeywordDefinitionsFromSource(fileContent, fileUri.fsPath || fileUri.path)
+      );
     }
 
     const enumNameSet = new Set(enumsByName.keys());
@@ -1408,7 +598,6 @@ class RobotEnumHintService {
     }
 
     return {
-      generation: ++this._generation,
       enumsByName,
       enumsByQualifiedName,
       keywordArgs,
@@ -1566,17 +755,11 @@ class RobotTypedVariableCompletionProvider {
   }
 
   async provideCompletionItems(document, position) {
-    if (!isRobotDocument(document)) {
+    if (!isRobotDocument(document) || !isTypedVariableCompletionsEnabled()) {
       return undefined;
     }
 
-    const typedVariableCompletionsEnabled = isTypedVariableCompletionsEnabled();
-    const returnMemberCompletionsEnabled = isReturnMemberCompletionsEnabled();
-    if (!typedVariableCompletionsEnabled && !returnMemberCompletionsEnabled) {
-      return undefined;
-    }
-
-    const parsed = this._parser.getParsed(document, { allowStale: true });
+    const parsed = this._parser.getParsed(document);
     const argumentContext = getNamedArgumentValueContextAtPosition(document, position);
     if (!argumentContext) {
       return undefined;
@@ -1593,28 +776,6 @@ class RobotTypedVariableCompletionProvider {
 
     const index = await this._enumHintService.getIndexForDocument(document);
     if (!index) {
-      return undefined;
-    }
-
-    if (returnMemberCompletionsEnabled) {
-      const memberContext = getReturnMemberCompletionContextAtPosition(document, position, argumentContext);
-      if (memberContext) {
-        const memberItems = this._buildReturnMemberCompletionItems(
-          document,
-          position,
-          parsed,
-          index,
-          owner,
-          memberContext
-        );
-        if (memberItems.length > 0) {
-          return new vscode.CompletionList(memberItems, false);
-        }
-        return undefined;
-      }
-    }
-
-    if (!typedVariableCompletionsEnabled) {
       return undefined;
     }
 
@@ -1653,581 +814,12 @@ class RobotTypedVariableCompletionProvider {
         `From keyword \`${candidate.keywordName}\` (line ${candidate.assignmentLine + 1})\n\n` +
           `Return types: \`${candidate.typeNamesOriginal.join(" | ")}\``
       );
-      item.sortText = `0001_${String(999999 - candidate.assignmentLine).padStart(6, "0")}_${candidate.variableToken.toLowerCase()}`;
+      item.sortText = `${String(999999 - candidate.assignmentLine).padStart(6, "0")}_${candidate.variableToken.toLowerCase()}`;
       return item;
     });
 
     return new vscode.CompletionList(items, false);
   }
-
-  _buildReturnMemberCompletionItems(document, position, parsed, index, owner, memberContext) {
-    const assignment = findLatestKeywordCallAssignmentForVariable(
-      parsed.keywordCallAssignments,
-      owner.id,
-      normalizeVariableLookupToken(memberContext.rootVariableToken),
-      position.line,
-      parsed
-    );
-    if (!assignment) {
-      return [];
-    }
-
-    const normalizedKeyword = normalizeKeywordName(assignment.keywordName);
-    const returnDefinition = getKeywordReturnDefinition(index, normalizedKeyword);
-    const returnAnnotation = String(
-      returnDefinition?.returnAnnotation || index.keywordReturns?.get(normalizedKeyword) || ""
-    ).trim();
-    if (!returnAnnotation) {
-      return [];
-    }
-
-    const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
-    const rootTypeState = getCachedReturnTypeResolutionState(
-      index,
-      normalizedKeyword,
-      returnDefinition,
-      returnAnnotation,
-      subtypePolicy
-    );
-    if (!Array.isArray(rootTypeState.typeNames) || rootTypeState.typeNames.length === 0) {
-      return [];
-    }
-
-    let currentTypeNames = uniqueStrings(rootTypeState.typeNames);
-    let currentTypePreferences = cloneTypePreferenceMap(rootTypeState.typePreferencesByName);
-    let pathCacheKey = rootTypeState.cacheKey;
-
-    for (const segment of memberContext.completedSegments) {
-      const segmentCacheKey = `${pathCacheKey}->${serializeCompletedReturnMemberSegment(segment)}`;
-      const cachedTransition = RETURN_MEMBER_PATH_STATE_CACHE.get(segmentCacheKey);
-      if (cachedTransition === null) {
-        return [];
-      }
-      if (cachedTransition) {
-        currentTypeNames = [...cachedTransition.typeNames];
-        currentTypePreferences = cloneTypePreferenceMap(cachedTransition.typePreferencesByName);
-        pathCacheKey = segmentCacheKey;
-        continue;
-      }
-
-      const nextTypes = resolveMemberPathSegmentTypes(
-        segment,
-        currentTypeNames,
-        currentTypePreferences,
-        index,
-        subtypePolicy
-      );
-      if (!nextTypes) {
-        setBoundedMapValue(
-          RETURN_MEMBER_PATH_STATE_CACHE,
-          segmentCacheKey,
-          null,
-          RETURN_MEMBER_PATH_STATE_CACHE_MAX_ENTRIES
-        );
-        return [];
-      }
-      const nextState = {
-        typeNames: uniqueStrings(nextTypes.typeNames || []),
-        typePreferencesByName: cloneTypePreferenceMap(nextTypes.typePreferencesByName)
-      };
-      if (nextState.typeNames.length === 0) {
-        setBoundedMapValue(
-          RETURN_MEMBER_PATH_STATE_CACHE,
-          segmentCacheKey,
-          null,
-          RETURN_MEMBER_PATH_STATE_CACHE_MAX_ENTRIES
-        );
-        return [];
-      }
-      setBoundedMapValue(
-        RETURN_MEMBER_PATH_STATE_CACHE,
-        segmentCacheKey,
-        nextState,
-        RETURN_MEMBER_PATH_STATE_CACHE_MAX_ENTRIES
-      );
-      currentTypeNames = [...nextState.typeNames];
-      currentTypePreferences = cloneTypePreferenceMap(nextState.typePreferencesByName);
-      pathCacheKey = segmentCacheKey;
-    }
-
-    const memberFields = getCachedMemberFieldsForPath(pathCacheKey, currentTypeNames, currentTypePreferences, index);
-    if (!Array.isArray(memberFields) || memberFields.length === 0) {
-      return [];
-    }
-
-    const replacementRange = new vscode.Range(
-      position.line,
-      memberContext.replaceStart,
-      position.line,
-      memberContext.replaceEnd
-    );
-    const normalizedPrefix = normalizeComparableToken(memberContext.activeSegment);
-    const ownerTypeLabel = currentTypeNames.slice(0, 3).join(" | ");
-    const completionCacheKey = buildReturnMemberCompletionCacheKey(
-      index,
-      assignment,
-      memberContext.rootVariableToken,
-      pathCacheKey,
-      parsed.uri
-    );
-    const cachedSuggestions = RETURN_MEMBER_COMPLETION_CACHE.get(completionCacheKey);
-    if (Array.isArray(cachedSuggestions)) {
-      return buildReturnMemberCompletionItemsFromSuggestions(
-        cachedSuggestions,
-        replacementRange,
-        memberContext.rootVariableToken,
-        assignment,
-        ownerTypeLabel,
-        normalizedPrefix
-      );
-    }
-
-    const suggestions = buildMemberCompletionSuggestionsForFields(memberFields, index, subtypePolicy);
-
-    setBoundedMapValue(
-      RETURN_MEMBER_COMPLETION_CACHE,
-      completionCacheKey,
-      suggestions,
-      RETURN_MEMBER_COMPLETION_CACHE_MAX_ENTRIES
-    );
-
-    return buildReturnMemberCompletionItemsFromSuggestions(
-      suggestions,
-      replacementRange,
-      memberContext.rootVariableToken,
-      assignment,
-      ownerTypeLabel,
-      normalizedPrefix
-    );
-  }
-}
-
-function getReturnMemberCompletionContextAtPosition(document, position, argumentContext) {
-  if (!document || !position || !argumentContext) {
-    return undefined;
-  }
-
-  const valueStart = Number(argumentContext.valueStart);
-  if (!Number.isFinite(valueStart) || position.character < valueStart) {
-    return undefined;
-  }
-
-  const lineText = document.lineAt(position.line).text;
-  const safeCharacter = Math.max(valueStart, Math.min(position.character, lineText.length));
-  const valuePrefix = lineText.slice(valueStart, safeCharacter);
-  return parseReturnMemberCompletionPrefix(valuePrefix, valueStart, safeCharacter);
-}
-
-function parseReturnMemberCompletionPrefix(valuePrefix, valueStart, cursorCharacter) {
-  const source = String(valuePrefix || "");
-  const variablePrefixMatch = source.match(/^([@$&%])\{([^}\r\n]*)(\})?$/);
-  if (!variablePrefixMatch) {
-    return undefined;
-  }
-
-  const sigil = String(variablePrefixMatch[1] || "").trim();
-  const body = String(variablePrefixMatch[2] || "");
-  const hasClosingBrace = Boolean(variablePrefixMatch[3]);
-  const firstDotIndex = body.indexOf(".");
-  if (firstDotIndex <= 0) {
-    return undefined;
-  }
-
-  const rootVariableName = body.slice(0, firstDotIndex).trim();
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rootVariableName)) {
-    return undefined;
-  }
-
-  const pathSource = body.slice(firstDotIndex + 1);
-  const rawSegments = pathSource.split(".");
-  if (rawSegments.length === 0) {
-    return undefined;
-  }
-
-  const activeRawSegment = rawSegments[rawSegments.length - 1] || "";
-  const activeSegment = activeRawSegment.trim();
-  if (activeSegment && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(activeSegment)) {
-    return undefined;
-  }
-
-  const completedSegments = [];
-  for (const rawSegment of rawSegments.slice(0, -1)) {
-    const parsedSegment = parseCompletedReturnMemberSegment(rawSegment);
-    if (!parsedSegment) {
-      return undefined;
-    }
-    completedSegments.push(parsedSegment);
-  }
-
-  const replacementEnd = hasClosingBrace
-    ? Math.max(valueStart, cursorCharacter - 1)
-    : Math.max(valueStart, cursorCharacter);
-  const replaceStart = Math.max(valueStart, replacementEnd - activeRawSegment.length);
-  return {
-    rootVariableToken: `${sigil}{${rootVariableName}}`,
-    completedSegments,
-    activeSegment,
-    replaceStart,
-    replaceEnd: replacementEnd
-  };
-}
-
-function parseCompletedReturnMemberSegment(segmentText) {
-  const source = String(segmentText || "").trim();
-  if (!source) {
-    return undefined;
-  }
-
-  const segmentMatch = source.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)])?$/);
-  if (!segmentMatch) {
-    return undefined;
-  }
-
-  return {
-    name: segmentMatch[1],
-    hasIndex: typeof segmentMatch[2] === "string"
-  };
-}
-
-function serializeCompletedReturnMemberSegment(segment) {
-  if (!segment) {
-    return "";
-  }
-  const normalizedName = normalizeComparableToken(segment.name);
-  if (!normalizedName) {
-    return "";
-  }
-  return `${normalizedName}${segment.hasIndex ? "[0]" : ""}`;
-}
-
-function buildReturnMemberCompletionCacheKey(
-  index,
-  assignment,
-  rootVariableToken,
-  pathCacheKey,
-  documentUri = ""
-) {
-  const generation = Number.isFinite(Number(index?.generation)) ? Number(index.generation) : 0;
-  const normalizedDocumentUri = String(documentUri || "").trim();
-  const ownerId = String(assignment?.ownerId || "").trim();
-  const normalizedKeyword = normalizeKeywordName(assignment?.keywordName);
-  const assignmentLine = Number.isFinite(Number(assignment?.startLine)) ? Number(assignment.startLine) : -1;
-  const normalizedRootVariable = normalizeVariableLookupToken(rootVariableToken);
-  return [
-    generation,
-    normalizedDocumentUri,
-    ownerId,
-    normalizedKeyword,
-    assignmentLine,
-    normalizedRootVariable,
-    String(pathCacheKey || "")
-  ].join("|");
-}
-
-function buildReturnMemberCompletionItemsFromSuggestions(
-  suggestions,
-  replacementRange,
-  rootVariableToken,
-  assignment,
-  ownerTypeLabel,
-  normalizedPrefix = ""
-) {
-  const items = [];
-  for (const suggestion of suggestions || []) {
-    const insertSegment = String(suggestion?.insertSegment || "").trim();
-    const fieldName = String(suggestion?.fieldName || "").trim();
-    if (!insertSegment || !fieldName) {
-      continue;
-    }
-    const normalizedFieldName = normalizeComparableToken(fieldName);
-    if (normalizedPrefix && !normalizedFieldName.startsWith(normalizedPrefix)) {
-      continue;
-    }
-    const fieldTypeLabel = String(suggestion?.fieldTypeLabel || "").trim();
-    const item = new vscode.CompletionItem(insertSegment, vscode.CompletionItemKind.Field);
-    item.textEdit = vscode.TextEdit.replace(replacementRange, insertSegment);
-    item.insertText = insertSegment;
-    item.filterText = fieldName;
-    item.detail = fieldTypeLabel ? `Return member (${fieldTypeLabel})` : "Return member";
-    item.documentation = new vscode.MarkdownString(
-      `From variable \`${rootVariableToken}\` returned by \`${assignment.keywordName}\` (line ${
-        assignment.startLine + 1
-      })` +
-        (ownerTypeLabel ? `\n\nOwner type: \`${ownerTypeLabel}\`` : "") +
-        (fieldTypeLabel ? `\n\nField type: \`${fieldTypeLabel}\`` : "")
-    );
-    item.sortText = `0000_${insertSegment.toLowerCase()}`;
-    item.commitCharacters = ["."];
-    items.push(item);
-  }
-  return items;
-}
-
-function getCachedMemberFieldsForPath(pathCacheKey, currentTypeNames, currentTypePreferences, index) {
-  const fieldsCacheKey = `${String(pathCacheKey || "")}::fields`;
-  let memberFields = RETURN_MEMBER_FIELDS_CACHE.get(fieldsCacheKey);
-  if (!Array.isArray(memberFields)) {
-    memberFields = collectDeclaredFieldsForTypes(currentTypeNames, index, {
-      typePreferencesByName: currentTypePreferences
-    });
-    setBoundedMapValue(
-      RETURN_MEMBER_FIELDS_CACHE,
-      fieldsCacheKey,
-      memberFields,
-      RETURN_MEMBER_FIELDS_CACHE_MAX_ENTRIES
-    );
-  }
-  return Array.isArray(memberFields) ? memberFields : [];
-}
-
-function buildMemberCompletionSuggestionsForFields(memberFields, index, subtypePolicy) {
-  const suggestions = [];
-  const seenMemberNames = new Set();
-  for (const field of memberFields || []) {
-    const fieldName = String(field?.name || "").trim();
-    if (!fieldName) {
-      continue;
-    }
-    const normalizedFieldName = normalizeComparableToken(fieldName);
-    if (!normalizedFieldName || seenMemberNames.has(normalizedFieldName)) {
-      continue;
-    }
-    seenMemberNames.add(normalizedFieldName);
-
-    const fieldResolutionContext = buildTypeResolutionContextFromSource(
-      index,
-      field.sourceFilePath,
-      field.sourceModulePath,
-      field.sourcePackagePath
-    );
-    const fieldTypeResolution = resolveIndexedTypesFromAnnotation(field.annotation, index, {
-      policy: subtypePolicy,
-      resolutionContext: fieldResolutionContext
-    });
-    const insertSegment = fieldTypeResolution.hasCollectionSubtype ? `${fieldName}[0]` : fieldName;
-    const fieldTypeLabel = String(field.annotation || "").trim();
-    suggestions.push({
-      insertSegment,
-      fieldName,
-      fieldTypeLabel
-    });
-  }
-  return suggestions;
-}
-
-function buildParsedAssignmentLookupCacheKey(parsed) {
-  const uri = String(parsed?.uri || "").trim();
-  if (!uri) {
-    return "";
-  }
-  const version = Number.isFinite(Number(parsed?.version)) ? Number(parsed.version) : -1;
-  return `${uri}|${version}`;
-}
-
-function getParsedAssignmentLookup(parsed) {
-  const cacheKey = buildParsedAssignmentLookupCacheKey(parsed);
-  if (!cacheKey) {
-    return {
-      setVariableByOwner: new Map(),
-      setVariableResolvedValueById: new Map(),
-      keywordReturnByOwner: new Map()
-    };
-  }
-
-  const cached = PARSED_ASSIGNMENT_LOOKUP_CACHE.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const setVariableByOwner = new Map();
-  const setVariableResolvedValueById = new Map();
-  for (const assignment of parsed?.variableAssignments || []) {
-    const ownerId = String(assignment?.ownerId || "").trim();
-    const normalizedVariable = normalizeVariableLookupToken(assignment?.normalizedVariable || assignment?.variableToken);
-    if (!ownerId || !normalizedVariable) {
-      continue;
-    }
-    let byVariable = setVariableByOwner.get(ownerId);
-    if (!byVariable) {
-      byVariable = new Map();
-      setVariableByOwner.set(ownerId, byVariable);
-    }
-    const assignmentList = byVariable.get(normalizedVariable) || [];
-    assignmentList.push(assignment);
-    byVariable.set(normalizedVariable, assignmentList);
-    if (assignment?.id) {
-      setVariableResolvedValueById.set(assignment.id, extractCurrentValueFromSetVariableAssignment(assignment.valueRaw));
-    }
-  }
-
-  const keywordReturnByOwner = new Map();
-  for (const assignment of parsed?.keywordCallAssignments || []) {
-    const ownerId = String(assignment?.ownerId || "").trim();
-    if (!ownerId || !Array.isArray(assignment?.normalizedReturnVariables)) {
-      continue;
-    }
-    let byVariable = keywordReturnByOwner.get(ownerId);
-    if (!byVariable) {
-      byVariable = new Map();
-      keywordReturnByOwner.set(ownerId, byVariable);
-    }
-    for (const returnVariable of assignment.normalizedReturnVariables) {
-      const normalizedVariable = normalizeVariableLookupToken(returnVariable);
-      if (!normalizedVariable) {
-        continue;
-      }
-      const assignmentList = byVariable.get(normalizedVariable) || [];
-      assignmentList.push(assignment);
-      byVariable.set(normalizedVariable, assignmentList);
-    }
-  }
-
-  const lookup = {
-    setVariableByOwner,
-    setVariableResolvedValueById,
-    keywordReturnByOwner
-  };
-  const uriPrefix = `${String(parsed?.uri || "").trim()}|`;
-  if (uriPrefix !== "|") {
-    removeMapEntriesByPrefix(PARSED_ASSIGNMENT_LOOKUP_CACHE, uriPrefix);
-  }
-  setBoundedMapValue(
-    PARSED_ASSIGNMENT_LOOKUP_CACHE,
-    cacheKey,
-    lookup,
-    PARSED_ASSIGNMENT_LOOKUP_CACHE_MAX_ENTRIES
-  );
-  return lookup;
-}
-
-function findLatestAssignmentAtOrBeforeLine(assignments, line) {
-  const safeLine = Number(line);
-  if (!Array.isArray(assignments) || assignments.length === 0 || !Number.isFinite(safeLine)) {
-    return undefined;
-  }
-  let left = 0;
-  let right = assignments.length - 1;
-  let selected = undefined;
-  while (left <= right) {
-    const middle = left + Math.floor((right - left) / 2);
-    const assignment = assignments[middle];
-    const startLine = Number.isFinite(Number(assignment?.startLine)) ? Number(assignment.startLine) : -1;
-    if (startLine <= safeLine) {
-      selected = assignment;
-      left = middle + 1;
-    } else {
-      right = middle - 1;
-    }
-  }
-  return selected;
-}
-
-function findLatestKeywordCallAssignmentForVariable(assignments, ownerId, normalizedVariable, line, parsed) {
-  const safeLine = Number(line);
-  if (!Array.isArray(assignments) || !ownerId || !normalizedVariable || !Number.isFinite(safeLine)) {
-    return undefined;
-  }
-
-  const parsedLookup = getParsedAssignmentLookup(parsed);
-  const ownerKeywordAssignments = parsedLookup.keywordReturnByOwner.get(ownerId);
-  const assignmentList = ownerKeywordAssignments?.get(normalizedVariable) || [];
-  if (assignmentList.length > 0) {
-    const selectedFromLookup = findLatestAssignmentAtOrBeforeLine(assignmentList, safeLine);
-    if (selectedFromLookup) {
-      return selectedFromLookup;
-    }
-  }
-
-  let selectedAssignment = undefined;
-  for (const assignment of assignments) {
-    if (assignment.ownerId !== ownerId || assignment.startLine > safeLine) {
-      continue;
-    }
-    if (!Array.isArray(assignment.normalizedReturnVariables)) {
-      continue;
-    }
-    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
-  return selectedAssignment;
-}
-
-function resolveMemberPathSegmentTypes(
-  segment,
-  currentTypeNames,
-  currentTypePreferences,
-  index,
-  subtypePolicy
-) {
-  if (!segment || !Array.isArray(currentTypeNames) || currentTypeNames.length === 0 || !index) {
-    return undefined;
-  }
-
-  const normalizedSegmentName = normalizeComparableToken(segment.name);
-  if (!normalizedSegmentName) {
-    return undefined;
-  }
-
-  const candidateFields = collectDeclaredFieldsForTypes(currentTypeNames, index, {
-    typePreferencesByName: currentTypePreferences
-  });
-  if (!Array.isArray(candidateFields) || candidateFields.length === 0) {
-    return undefined;
-  }
-
-  const matchingFields = candidateFields.filter(
-    (field) => normalizeComparableToken(field.name) === normalizedSegmentName
-  );
-  if (matchingFields.length === 0) {
-    return undefined;
-  }
-
-  const nextTypeNames = [];
-  const nextTypePreferences = cloneTypePreferenceMap(currentTypePreferences);
-  let matchedAnyTransition = false;
-
-  for (const matchingField of matchingFields) {
-    const fieldResolutionContext = buildTypeResolutionContextFromSource(
-      index,
-      matchingField.sourceFilePath,
-      matchingField.sourceModulePath,
-      matchingField.sourcePackagePath
-    );
-    const fieldTypeResolution = resolveIndexedTypesFromAnnotation(matchingField.annotation, index, {
-      policy: subtypePolicy,
-      resolutionContext: fieldResolutionContext
-    });
-    const requiresIndex = Boolean(fieldTypeResolution.hasCollectionSubtype);
-
-    if (segment.hasIndex && !requiresIndex) {
-      continue;
-    }
-    if (!segment.hasIndex && requiresIndex) {
-      continue;
-    }
-
-    if (!Array.isArray(fieldTypeResolution.typeNames) || fieldTypeResolution.typeNames.length === 0) {
-      continue;
-    }
-
-    matchedAnyTransition = true;
-    nextTypeNames.push(...fieldTypeResolution.typeNames);
-    mergeTypePreferenceMaps(nextTypePreferences, fieldTypeResolution.typePreferencesByName);
-  }
-
-  const dedupedNextTypeNames = uniqueStrings(nextTypeNames);
-  if (!matchedAnyTransition || dedupedNextTypeNames.length === 0) {
-    return undefined;
-  }
-
-  return {
-    typeNames: dedupedNextTypeNames,
-    typePreferencesByName: nextTypePreferences
-  };
 }
 
 class RobotDocPreviewViewProvider {
@@ -2689,7 +1281,7 @@ class RobotDocPreviewController {
 
     const timer = setTimeout(() => {
       this._debounceTimers.delete(key);
-      this._parser.getParsed(event.document);
+      this._parser.parse(event.document);
 
       const activeEditor = vscode.window.activeTextEditor;
       if (activeEditor && activeEditor.document.uri.toString() === key) {
@@ -2827,22 +1419,9 @@ class RobotReturnPreviewViewProvider {
     }
 
     const currentSequence = ++this._renderSequence;
-    const detailsMarkdown = String(this._state.detailsMarkdown || "");
-    let renderedDetailsHtml = "<p class=\"muted\">No return structure selected.</p>";
-    if (detailsMarkdown) {
-      const cachedRenderedHtml = RETURN_PREVIEW_HTML_CACHE.get(detailsMarkdown);
-      if (typeof cachedRenderedHtml === "string") {
-        renderedDetailsHtml = cachedRenderedHtml;
-      } else {
-        renderedDetailsHtml = await renderMarkdownToHtml(detailsMarkdown);
-        setBoundedMapValue(
-          RETURN_PREVIEW_HTML_CACHE,
-          detailsMarkdown,
-          renderedDetailsHtml,
-          RETURN_PREVIEW_HTML_CACHE_MAX_ENTRIES
-        );
-      }
-    }
+    const renderedDetailsHtml = this._state.detailsMarkdown
+      ? await renderMarkdownToHtml(this._state.detailsMarkdown)
+      : "<p class=\"muted\">No return structure selected.</p>";
 
     if (!this._view || currentSequence !== this._renderSequence) {
       return;
@@ -3073,7 +1652,6 @@ class RobotReturnExplorerController {
     this._syncSequence = 0;
     this._suspendAutoSyncUntil = 0;
     this._debounceTimers = new Map();
-    this._lastPreviewStateSignature = "";
     this._disposables = [];
 
     this._disposables.push(
@@ -3091,7 +1669,6 @@ class RobotReturnExplorerController {
       clearTimeout(timer);
     }
     this._debounceTimers.clear();
-    this._lastPreviewStateSignature = "";
 
     for (const disposable of this._disposables) {
       disposable.dispose();
@@ -3101,27 +1678,6 @@ class RobotReturnExplorerController {
 
   async refresh() {
     await this._syncFromActiveEditor();
-  }
-
-  _updatePreviewState(state, options = {}) {
-    const normalizedState = cloneReturnPreviewState(state);
-    const cacheKey = String(options.cacheKey || "").trim();
-    if (cacheKey) {
-      setBoundedMapValue(
-        RETURN_PREVIEW_STATE_CACHE,
-        cacheKey,
-        normalizedState,
-        RETURN_PREVIEW_STATE_CACHE_MAX_ENTRIES
-      );
-    }
-
-    const signature = buildReturnPreviewStateSignature(normalizedState);
-    if (signature === this._lastPreviewStateSignature) {
-      return;
-    }
-
-    this._lastPreviewStateSignature = signature;
-    this._previewProvider.update(normalizedState);
   }
 
   async previewKeywordArgument(payload = {}, options = {}) {
@@ -3199,12 +1755,29 @@ class RobotReturnExplorerController {
 
     if (!enumContext) {
       this._suspendAutoSyncUntil = Date.now() + 250;
-      await this._syncFromActiveEditor(editor, { typingPass: false });
+      await this._syncFromActiveEditor(editor);
       return;
     }
 
     const owner = findOwnerForLine(parsed.owners, referenceLine);
-    this._updatePreviewState(createEnumReturnPreviewState(parsed, owner ? owner.name : "", enumContext));
+    this._previewProvider.update({
+      contextKind: "enum",
+      documentUri: parsed.uri,
+      fileName: parsed.fileName,
+      ownerName: owner ? owner.name : "",
+      variableToken: enumContext.argumentName,
+      keywordName: enumContext.keywordName,
+      returnAnnotation: "",
+      currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
+      currentValueSource: enumContext.currentValueSource || "",
+      currentValueSourceLine: enumContext.currentValueSourceLine,
+      sourceUri: "",
+      sourceLine: undefined,
+      sourceFilePath: "",
+      sourceFunctionName: "",
+      detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
+      infoMessage: ""
+    });
     this._suspendAutoSyncUntil = Date.now() + 250;
   }
 
@@ -3227,7 +1800,7 @@ class RobotReturnExplorerController {
       return;
     }
 
-    void this._syncFromActiveEditor(event.textEditor, { typingPass: false });
+    void this._syncFromActiveEditor(event.textEditor);
   }
 
   _onDocumentChanged(event) {
@@ -3241,27 +1814,13 @@ class RobotReturnExplorerController {
       clearTimeout(previousTimer);
     }
 
-    const activeEditor = vscode.window.activeTextEditor;
-    if (
-      getTypingUpdateMode() === "fast" &&
-      activeEditor &&
-      activeEditor.document.uri.toString() === key
-    ) {
-      void this._syncFromActiveEditor(activeEditor, {
-        typingPass: true
-      });
-    }
-
     const timer = setTimeout(() => {
       this._debounceTimers.delete(key);
-      this._parser.getParsed(event.document);
-      const currentEditor = vscode.window.activeTextEditor;
-      if (!currentEditor || currentEditor.document.uri.toString() !== key) {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor || activeEditor.document.uri.toString() !== key) {
         return;
       }
-      void this._syncFromActiveEditor(currentEditor, {
-        typingPass: false
-      });
+      void this._syncFromActiveEditor(activeEditor);
     }, getDebounceMs());
 
     this._debounceTimers.set(key, timer);
@@ -3276,7 +1835,7 @@ class RobotReturnExplorerController {
     }
 
     if (!vscode.window.activeTextEditor) {
-      this._updatePreviewState(
+      this._previewProvider.update(
         createEmptyReturnPreviewState(
           "Open a .robot file and place cursor on a keyword token, return variable, or named argument."
         )
@@ -3284,17 +1843,15 @@ class RobotReturnExplorerController {
     }
   }
 
-  async _syncFromActiveEditor(editor = vscode.window.activeTextEditor, options = {}) {
+  async _syncFromActiveEditor(editor = vscode.window.activeTextEditor) {
     const currentSequence = ++this._syncSequence;
-    const typingPass = options.typingPass === true;
-    const fastTypingPass = typingPass && getTypingUpdateMode() === "fast";
     if (!isReturnExplorerEnabled()) {
-      this._updatePreviewState(createEmptyReturnPreviewState("Return explorer is disabled in settings."));
+      this._previewProvider.update(createEmptyReturnPreviewState("Return explorer is disabled in settings."));
       return;
     }
 
     if (!editor || !isRobotDocument(editor.document)) {
-      this._updatePreviewState(
+      this._previewProvider.update(
         createEmptyReturnPreviewState(
           "Open a .robot file and place cursor on a keyword token, return variable, or named argument."
         )
@@ -3302,74 +1859,17 @@ class RobotReturnExplorerController {
       return;
     }
 
-    const parsed = this._parser.getParsed(editor.document, { allowStale: true });
-    const activePosition = editor.selection.active;
-    const namedArgumentContext = getNamedArgumentValueContextAtPosition(editor.document, activePosition);
-    const owner = findOwnerForLine(parsed.owners, activePosition.line);
-    const namedArgumentCacheKey = buildNamedArgumentPreviewCacheKey(
-      parsed.uri,
-      owner ? owner.id : "",
-      namedArgumentContext,
-      activePosition.line
-    );
-
-    if (fastTypingPass && namedArgumentCacheKey) {
-      const cachedPreviewState = RETURN_PREVIEW_STATE_CACHE.get(namedArgumentCacheKey);
-      if (cachedPreviewState) {
-        this._updatePreviewState(cachedPreviewState, {
-          cacheKey: namedArgumentCacheKey
-        });
-        return;
-      }
-    }
-
-    if (isEnumValueHoverEnabled() && namedArgumentContext) {
-      let enumContext = undefined;
-      try {
-        enumContext = await resolveEnumValuePreviewFromContext(
-          editor.document,
-          this._enumHintService,
-          namedArgumentContext,
-          {
-            parsed,
-            referenceLine: activePosition.line,
-            maxEnums: getEnumHoverMaxEnums(),
-            maxMembers: getEnumHoverMaxMembers(),
-            includeReturnHintContext: !fastTypingPass,
-            showResolvedCurrentValue: !fastTypingPass
-          }
-        );
-      } catch (error) {
-        const message = error && error.message ? error.message : String(error);
-        console.warn("[robot-companion] Enum side preview refresh failed:", message);
-      }
-
-      if (currentSequence !== this._syncSequence) {
-        return;
-      }
-
-      if (enumContext) {
-        this._updatePreviewState(
-          createEnumReturnPreviewState(parsed, owner ? owner.name : "", enumContext),
-          {
-            cacheKey: namedArgumentCacheKey
-          }
-        );
-        return;
-      }
-    }
-
+    const parsed = this._parser.getParsed(editor.document);
     let returnContext;
     try {
       returnContext = await resolveKeywordReturnPreview(
         editor.document,
         parsed,
-        activePosition,
+        editor.selection.active,
         this._enumHintService,
         {
-          maxDepth: getReturnPreviewMaxDepth(),
-          maxFieldsPerType: getReturnMaxFieldsPerType(),
-          includeTechnicalStructure: !fastTypingPass
+        maxDepth: getReturnPreviewMaxDepth(),
+        maxFieldsPerType: getReturnMaxFieldsPerType()
         }
       );
     } catch (error) {
@@ -3378,22 +1878,73 @@ class RobotReturnExplorerController {
       if (currentSequence !== this._syncSequence) {
         return;
       }
-      this._updatePreviewState(
+      this._previewProvider.update(
         createEmptyReturnPreviewState("Failed to resolve return structure. Check Extension Host logs.")
       );
       return;
+    }
+
+    let enumContext = undefined;
+    if (isEnumValueHoverEnabled()) {
+      try {
+        enumContext = await resolveEnumValuePreview(editor.document, editor.selection.active, this._enumHintService, {
+          parsed,
+          maxEnums: getEnumHoverMaxEnums(),
+          maxMembers: getEnumHoverMaxMembers()
+        });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        console.warn("[robot-companion] Enum side preview refresh failed:", message);
+      }
     }
 
     if (currentSequence !== this._syncSequence) {
       return;
     }
 
+    if (enumContext) {
+      const owner = findOwnerForLine(parsed.owners, editor.selection.active.line);
+      this._previewProvider.update({
+        contextKind: "enum",
+        documentUri: parsed.uri,
+        fileName: parsed.fileName,
+        ownerName: owner ? owner.name : "",
+        variableToken: enumContext.argumentName,
+        keywordName: enumContext.keywordName,
+        returnAnnotation: "",
+        currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
+        currentValueSource: enumContext.currentValueSource || "",
+        currentValueSourceLine: enumContext.currentValueSourceLine,
+        sourceUri: "",
+        sourceLine: undefined,
+        sourceFilePath: "",
+        sourceFunctionName: "",
+        detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
+        infoMessage: ""
+      });
+      return;
+    }
+
     if (returnContext) {
-      this._updatePreviewState(
-        createReturnStructurePreviewState(parsed, returnContext, {
-          includeTechnicalDetails: !fastTypingPass
-        })
-      );
+      this._previewProvider.update({
+        contextKind: "return",
+        fileName: parsed.fileName,
+        ownerName: returnContext.owner.name,
+        variableToken: returnContext.variableToken.token,
+        keywordName: returnContext.assignment.keywordName,
+        returnAnnotation: returnContext.returnAnnotation,
+        sourceUri: "",
+        sourceLine: undefined,
+        sourceFilePath: "",
+        sourceFunctionName: "",
+        detailsMarkdown: buildReturnPreviewMarkdown(returnContext),
+        infoMessage:
+          returnContext.returnAnnotation.length === 0
+            ? "No return annotation found for this keyword in indexed Python sources."
+            : returnContext.simpleAccess.firstLevel.length === 0 && returnContext.technicalStructureLines.length === 0
+            ? "No indexed structured return type resolved from this annotation."
+            : ""
+      });
       return;
     }
 
@@ -3402,7 +1953,7 @@ class RobotReturnExplorerController {
       keywordDocContext = await resolveKeywordDocumentationPreview(
         editor.document,
         parsed,
-        activePosition,
+        editor.selection.active,
         this._enumHintService
       );
     } catch (error) {
@@ -3415,97 +1966,35 @@ class RobotReturnExplorerController {
     }
 
     if (keywordDocContext) {
-      this._updatePreviewState(createKeywordDocReturnPreviewState(parsed, keywordDocContext));
+      this._previewProvider.update({
+        contextKind: "keyword-doc",
+        documentUri: parsed.uri,
+        fileName: parsed.fileName,
+        ownerName: keywordDocContext.owner ? keywordDocContext.owner.name : "",
+        variableToken: keywordDocContext.keywordToken.keywordName,
+        keywordName: keywordDocContext.keywordToken.keywordName,
+        returnAnnotation: "",
+        currentValue: "",
+        currentValueSource: "",
+        currentValueSourceLine: undefined,
+        sourceUri: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceUri : "",
+        sourceLine: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceLine : undefined,
+        sourceFilePath: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceFilePath : "",
+        sourceFunctionName: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.functionName : "",
+        detailsMarkdown: buildKeywordDocPreviewMarkdown(keywordDocContext),
+        infoMessage: keywordDocContext.warningMessage || ""
+      });
       return;
     }
 
-    this._updatePreviewState(
+    this._previewProvider.update(
       createEmptyReturnPreviewState("Place cursor on a keyword token, variable, or named argument in a keyword call.")
     );
   }
 }
 
-function createEnumReturnPreviewState(parsed, ownerName, enumContext) {
-  return {
-    contextKind: "enum",
-    documentUri: parsed.uri,
-    fileName: parsed.fileName,
-    ownerName: ownerName || "",
-    variableToken: enumContext.argumentName,
-    keywordName: enumContext.keywordName,
-    returnAnnotation: "",
-    currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
-    currentValueSource: enumContext.currentValueSource || "",
-    currentValueSourceLine: enumContext.currentValueSourceLine,
-    sourceUri: "",
-    sourceLine: undefined,
-    sourceFilePath: "",
-    sourceFunctionName: "",
-    detailsMarkdown: buildEnumPreviewMarkdown(enumContext),
-    infoMessage: ""
-  };
-}
-
-function createReturnStructurePreviewState(parsed, returnContext, options = {}) {
-  const includeTechnicalDetails = options.includeTechnicalDetails !== false;
-  return {
-    contextKind: "return",
-    documentUri: parsed.uri,
-    fileName: parsed.fileName,
-    ownerName: returnContext.owner.name,
-    variableToken: returnContext.variableToken.token,
-    keywordName: returnContext.assignment.keywordName,
-    returnAnnotation: returnContext.returnAnnotation,
-    sourceUri: "",
-    sourceLine: undefined,
-    sourceFilePath: "",
-    sourceFunctionName: "",
-    detailsMarkdown: buildReturnPreviewMarkdown(returnContext, {
-      includeTechnicalDetails
-    }),
-    infoMessage:
-      returnContext.returnAnnotation.length === 0
-        ? "No return annotation found for this keyword in indexed Python sources."
-        : returnContext.simpleAccess.firstLevel.length === 0 && returnContext.technicalStructureLines.length === 0
-        ? "No indexed structured return type resolved from this annotation."
-        : ""
-  };
-}
-
-function createKeywordDocReturnPreviewState(parsed, keywordDocContext) {
-  return {
-    contextKind: "keyword-doc",
-    documentUri: parsed.uri,
-    fileName: parsed.fileName,
-    ownerName: keywordDocContext.owner ? keywordDocContext.owner.name : "",
-    variableToken: keywordDocContext.keywordToken.keywordName,
-    keywordName: keywordDocContext.keywordToken.keywordName,
-    returnAnnotation: "",
-    currentValue: "",
-    currentValueSource: "",
-    currentValueSourceLine: undefined,
-    sourceUri: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceUri : "",
-    sourceLine: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceLine : undefined,
-    sourceFilePath: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.sourceFilePath : "",
-    sourceFunctionName: keywordDocContext.primaryCandidate ? keywordDocContext.primaryCandidate.functionName : "",
-    detailsMarkdown: buildKeywordDocPreviewMarkdown(keywordDocContext),
-    infoMessage: keywordDocContext.warningMessage || ""
-  };
-}
-
-function buildNamedArgumentPreviewCacheKey(documentUri, ownerId, context, line = 0) {
-  const normalizedKeyword = normalizeKeywordName(context?.keywordName);
-  const normalizedArgument = normalizeArgumentName(context?.argumentName);
-  if (!documentUri || !normalizedKeyword || !normalizedArgument) {
-    return "";
-  }
-  const safeLine = Number.isFinite(Number(line)) ? Math.max(0, Number(line)) : 0;
-  return `namedarg|${documentUri}|${String(ownerId || "")}|${safeLine}|${normalizedKeyword}|${normalizedArgument}`;
-}
-
-function buildReturnPreviewMarkdown(context, options = {}) {
+function buildReturnPreviewMarkdown(context) {
   const lines = [];
-  const includeTechnicalDetails = options.includeTechnicalDetails !== false;
 
   lines.push("### What You Can Access");
   lines.push("");
@@ -3535,7 +2024,7 @@ function buildReturnPreviewMarkdown(context, options = {}) {
     lines.push("");
   }
 
-  if (includeTechnicalDetails && context.technicalStructureLines.length > 0) {
+  if (context.technicalStructureLines.length > 0) {
     lines.push("### Technical Details (Developer)");
     lines.push("");
     lines.push("```text");
@@ -4306,51 +2795,6 @@ function createEmptyReturnPreviewState(infoMessage = "") {
   };
 }
 
-function cloneReturnPreviewState(state) {
-  return {
-    contextKind: String(state?.contextKind || ""),
-    documentUri: String(state?.documentUri || ""),
-    fileName: String(state?.fileName || ""),
-    ownerName: String(state?.ownerName || ""),
-    variableToken: String(state?.variableToken || ""),
-    keywordName: String(state?.keywordName || ""),
-    returnAnnotation: String(state?.returnAnnotation || ""),
-    currentValue: String(state?.currentValue || ""),
-    currentValueSource: String(state?.currentValueSource || ""),
-    currentValueSourceLine: Number.isFinite(Number(state?.currentValueSourceLine))
-      ? Number(state.currentValueSourceLine)
-      : undefined,
-    sourceUri: String(state?.sourceUri || ""),
-    sourceLine: Number.isFinite(Number(state?.sourceLine)) ? Number(state.sourceLine) : undefined,
-    sourceFilePath: String(state?.sourceFilePath || ""),
-    sourceFunctionName: String(state?.sourceFunctionName || ""),
-    detailsMarkdown: String(state?.detailsMarkdown || ""),
-    infoMessage: String(state?.infoMessage || "")
-  };
-}
-
-function buildReturnPreviewStateSignature(state) {
-  const normalizedState = cloneReturnPreviewState(state);
-  return [
-    normalizedState.contextKind,
-    normalizedState.documentUri,
-    normalizedState.fileName,
-    normalizedState.ownerName,
-    normalizedState.variableToken,
-    normalizedState.keywordName,
-    normalizedState.returnAnnotation,
-    normalizedState.currentValue,
-    normalizedState.currentValueSource,
-    Number.isFinite(Number(normalizedState.currentValueSourceLine)) ? Number(normalizedState.currentValueSourceLine) : "",
-    normalizedState.sourceUri,
-    Number.isFinite(Number(normalizedState.sourceLine)) ? Number(normalizedState.sourceLine) : "",
-    normalizedState.sourceFilePath,
-    normalizedState.sourceFunctionName,
-    normalizedState.detailsMarkdown,
-    normalizedState.infoMessage
-  ].join("\u0001");
-}
-
 function buildOwnerScopes(lines) {
   const owners = [];
   const ownerByLine = new Array(lines.length).fill(undefined);
@@ -4725,38 +3169,31 @@ async function resolveKeywordReturnPreview(document, parsed, position, enumHintS
   const returnAnnotation = String(
     returnDefinition?.returnAnnotation || index.keywordReturns?.get(normalizedKeyword) || ""
   ).trim();
+  const returnResolutionContext = buildTypeResolutionContextFromReturnDefinition(index, returnDefinition);
   const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
-  const returnTypeState = getCachedReturnTypeResolutionState(
-    index,
-    normalizedKeyword,
-    returnDefinition,
-    returnAnnotation,
-    subtypePolicy
-  );
-  const rootTypeNames = returnTypeState.typeNames;
-  const simpleAccess = getCachedSimpleReturnAccessPaths(variableContext.variableToken.token, rootTypeNames, index, {
-    rootCollectionLike: returnTypeState.hasCollectionSubtype,
-    subtypePolicy,
-    typePreferencesByName: returnTypeState.typePreferencesByName,
-    resolutionContext: returnTypeState.returnResolutionContext,
-    maxFieldsPerType: Math.max(1, Number(options.maxFieldsPerType) || 1),
-    maxDepth: Math.max(1, Math.min(12, Number(options.maxDepth) || 2)),
-    returnTypeCacheKey: returnTypeState.cacheKey
+  const returnTypeResolution = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+    policy: subtypePolicy,
+    resolutionContext: returnResolutionContext
   });
-  const includeTechnicalStructure = options.includeTechnicalStructure !== false;
-  const technicalStructureLines = includeTechnicalStructure
-    ? buildReturnStructureLines(
-        rootTypeNames,
-        index,
-        {
-          maxDepth: getReturnTechnicalMaxDepth(),
-          maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
-          typePreferencesByName: returnTypeState.typePreferencesByName,
-          resolutionContext: returnTypeState.returnResolutionContext
-        },
-        "technical"
-      )
-    : [];
+  const rootTypeNames = returnTypeResolution.typeNames;
+  const simpleAccess = buildSimpleReturnAccessPaths(variableContext.variableToken.token, rootTypeNames, index, {
+    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+    subtypePolicy,
+    typePreferencesByName: returnTypeResolution.typePreferencesByName,
+    resolutionContext: returnResolutionContext,
+    maxFieldsPerType: Math.max(1, Number(options.maxFieldsPerType) || 1)
+  });
+  const technicalStructureLines = buildReturnStructureLines(
+    rootTypeNames,
+    index,
+    {
+      maxDepth: getReturnTechnicalMaxDepth(),
+      maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
+      typePreferencesByName: returnTypeResolution.typePreferencesByName,
+      resolutionContext: returnResolutionContext
+    },
+    "technical"
+  );
 
   return {
     ...variableContext,
@@ -4786,13 +3223,21 @@ function getKeywordReturnVariableContextAtPosition(document, parsed, position) {
   }
 
   const normalizedVariable = normalizeVariableLookupToken(variableToken.token);
-  const selectedAssignment = findLatestKeywordCallAssignmentForVariable(
-    parsed.keywordCallAssignments,
-    owner.id,
-    normalizedVariable,
-    position.line,
-    parsed
-  );
+  let selectedAssignment = undefined;
+  for (const assignment of parsed.keywordCallAssignments) {
+    if (assignment.ownerId !== owner.id) {
+      continue;
+    }
+    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
+      continue;
+    }
+    if (assignment.startLine > position.line) {
+      continue;
+    }
+    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
+      selectedAssignment = assignment;
+    }
+  }
 
   if (!selectedAssignment) {
     return undefined;
@@ -4827,18 +3272,27 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, 
   }
 
   const normalizedVariable = normalizeVariableLookupToken(rawValue);
-  const parsedLookup = getParsedAssignmentLookup(parsed);
-  const ownerSetVariableAssignments = parsedLookup.setVariableByOwner.get(owner.id);
-  const assignmentList = ownerSetVariableAssignments?.get(normalizedVariable) || [];
-  const selectedAssignment = findLatestAssignmentAtOrBeforeLine(assignmentList, line);
+  let selectedAssignment = undefined;
+  for (const assignment of parsed.variableAssignments) {
+    if (assignment.ownerId !== owner.id) {
+      continue;
+    }
+    if (assignment.normalizedVariable !== normalizedVariable) {
+      continue;
+    }
+    if (assignment.startLine > line) {
+      continue;
+    }
+    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
+      selectedAssignment = assignment;
+    }
+  }
 
   if (!selectedAssignment) {
     return fallback;
   }
 
-  const resolvedValue = selectedAssignment.id
-    ? String(parsedLookup.setVariableResolvedValueById.get(selectedAssignment.id) || "")
-    : extractCurrentValueFromSetVariableAssignment(selectedAssignment.valueRaw);
+  const resolvedValue = extractCurrentValueFromSetVariableAssignment(selectedAssignment.valueRaw);
   if (!resolvedValue) {
     return fallback;
   }
@@ -4882,13 +3336,24 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
   }
 
   const normalizedVariable = normalizeVariableLookupToken(rawArgumentValue);
-  const selectedAssignment = findLatestKeywordCallAssignmentForVariable(
-    parsed.keywordCallAssignments,
-    owner.id,
-    normalizedVariable,
-    position.line,
-    parsed
-  );
+  let selectedAssignment = undefined;
+  for (const assignment of parsed.keywordCallAssignments) {
+    if (assignment.ownerId !== owner.id) {
+      continue;
+    }
+    if (!Array.isArray(assignment.normalizedReturnVariables)) {
+      continue;
+    }
+    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
+      continue;
+    }
+    if (assignment.startLine > position.line) {
+      continue;
+    }
+    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
+      selectedAssignment = assignment;
+    }
+  }
 
   if (!selectedAssignment) {
     return undefined;
@@ -4904,23 +3369,20 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
   const returnAnnotation = String(
     returnDefinition?.returnAnnotation || index.keywordReturns?.get(normalizedKeyword) || ""
   ).trim();
+  const returnResolutionContext = buildTypeResolutionContextFromReturnDefinition(index, returnDefinition);
   const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
-  const returnTypeState = getCachedReturnTypeResolutionState(
-    index,
-    normalizedKeyword,
-    returnDefinition,
-    returnAnnotation,
-    subtypePolicy
-  );
-  const rootTypeNames = returnTypeState.typeNames;
-  const simpleAccess = getCachedSimpleReturnAccessPaths(rawArgumentValue, rootTypeNames, index, {
-    rootCollectionLike: returnTypeState.hasCollectionSubtype,
+  const returnTypeResolution = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+    policy: subtypePolicy,
+    resolutionContext: returnResolutionContext
+  });
+  const rootTypeNames = returnTypeResolution.typeNames;
+  const simpleAccess = buildSimpleReturnAccessPaths(rawArgumentValue, rootTypeNames, index, {
+    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
     subtypePolicy,
-    typePreferencesByName: returnTypeState.typePreferencesByName,
-    resolutionContext: returnTypeState.returnResolutionContext,
+    typePreferencesByName: returnTypeResolution.typePreferencesByName,
+    resolutionContext: returnResolutionContext,
     maxDepth: getReturnHintArgumentMaxDepth(),
-    maxFieldsPerType: getReturnMaxFieldsPerType(),
-    returnTypeCacheKey: returnTypeState.cacheKey
+    maxFieldsPerType: getReturnMaxFieldsPerType()
   });
 
   return {
@@ -4944,8 +3406,8 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
       {
         maxDepth: getReturnTechnicalMaxDepth(),
         maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
-        typePreferencesByName: returnTypeState.typePreferencesByName,
-        resolutionContext: returnTypeState.returnResolutionContext
+        typePreferencesByName: returnTypeResolution.typePreferencesByName,
+        resolutionContext: returnResolutionContext
       },
       "technical"
     )
@@ -4961,95 +3423,6 @@ function getKeywordReturnDefinition(index, normalizedKeyword) {
     return undefined;
   }
   return definitions[0];
-}
-
-function buildReturnSubtypePolicySignature(policy) {
-  if (!policy) {
-    return "always|include:|exclude:";
-  }
-  const mode = String(policy.mode || "always").trim().toLowerCase() || "always";
-  const includePart = [...(policy.includeSet || [])]
-    .map((value) => normalizeComparableToken(value))
-    .filter(Boolean)
-    .sort()
-    .join(",");
-  const excludePart = [...(policy.excludeSet || [])]
-    .map((value) => normalizeComparableToken(value))
-    .filter(Boolean)
-    .sort()
-    .join(",");
-  return `${mode}|include:${includePart}|exclude:${excludePart}`;
-}
-
-function buildReturnResolutionStateCacheKey(index, normalizedKeyword, returnDefinition, returnAnnotation, subtypePolicy) {
-  const generation = Number.isFinite(Number(index?.generation)) ? Number(index.generation) : 0;
-  const keywordPart = String(normalizedKeyword || "").trim();
-  const sourcePathPart = String(returnDefinition?.sourceFilePath || "").trim();
-  const sourceLinePart = Number.isFinite(Number(returnDefinition?.sourceLine))
-    ? Number(returnDefinition.sourceLine)
-    : -1;
-  const functionPart = String(returnDefinition?.functionName || "").trim();
-  const annotationPart = String(returnAnnotation || "").trim();
-  const policyPart = buildReturnSubtypePolicySignature(subtypePolicy);
-  return [
-    generation,
-    keywordPart,
-    sourcePathPart,
-    sourceLinePart,
-    functionPart,
-    annotationPart,
-    policyPart
-  ].join("|");
-}
-
-function getCachedReturnTypeResolutionState(index, normalizedKeyword, returnDefinition, returnAnnotation, subtypePolicy) {
-  const normalizedAnnotation = String(returnAnnotation || "").trim();
-  const returnResolutionContext = buildTypeResolutionContextFromReturnDefinition(index, returnDefinition);
-  const cacheKey = buildReturnResolutionStateCacheKey(
-    index,
-    normalizedKeyword,
-    returnDefinition,
-    normalizedAnnotation,
-    subtypePolicy
-  );
-
-  const cached = RETURN_TYPE_STATE_CACHE.get(cacheKey);
-  if (cached) {
-    return {
-      cacheKey,
-      returnResolutionContext,
-      typeNames: [...cached.typeNames],
-      hasCollectionSubtype: Boolean(cached.hasCollectionSubtype),
-      containerNames: [...cached.containerNames],
-      typePreferencesByName: cloneTypePreferenceMap(cached.typePreferencesByName)
-    };
-  }
-
-  const resolved = resolveIndexedTypesFromAnnotation(normalizedAnnotation, index, {
-    policy: subtypePolicy,
-    resolutionContext: returnResolutionContext
-  });
-  const cachedState = {
-    typeNames: uniqueStrings(resolved.typeNames || []),
-    hasCollectionSubtype: Boolean(resolved.hasCollectionSubtype),
-    containerNames: uniqueStrings(resolved.containerNames || []),
-    typePreferencesByName: cloneTypePreferenceMap(resolved.typePreferencesByName)
-  };
-  setBoundedMapValue(
-    RETURN_TYPE_STATE_CACHE,
-    cacheKey,
-    cachedState,
-    RETURN_TYPE_STATE_CACHE_MAX_ENTRIES
-  );
-
-  return {
-    cacheKey,
-    returnResolutionContext,
-    typeNames: [...cachedState.typeNames],
-    hasCollectionSubtype: cachedState.hasCollectionSubtype,
-    containerNames: [...cachedState.containerNames],
-    typePreferencesByName: cloneTypePreferenceMap(cachedState.typePreferencesByName)
-  };
 }
 
 function buildTypeResolutionContextFromSource(
@@ -5641,61 +4014,6 @@ function shouldResolveSubtypeFromContainer(normalizedContainerName, policy) {
     return policy.includeSet.has(normalizedContainerName);
   }
   return policy.collectionContainers.has(normalizedContainerName);
-}
-
-function getCachedSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
-  const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
-  const rootCollectionLike = options.rootCollectionLike ? 1 : 0;
-  const generation = Number.isFinite(Number(index?.generation)) ? Number(index.generation) : 0;
-  const baseVariableToken = getVariableRootToken(variableToken);
-  const returnTypeCacheKey = String(options.returnTypeCacheKey || "").trim();
-  const rootTypeNamesKey = uniqueStrings(rootTypeNames || [])
-    .map((typeName) => normalizeComparableToken(typeName))
-    .filter(Boolean)
-    .sort()
-    .join(",");
-  const policySignature = buildReturnSubtypePolicySignature(options.subtypePolicy || getReturnSubtypeResolutionPolicy(index));
-  const cacheKey = [
-    generation,
-    returnTypeCacheKey,
-    rootTypeNamesKey,
-    normalizeVariableLookupToken(baseVariableToken),
-    rootCollectionLike,
-    maxDepth,
-    maxFieldsPerType,
-    policySignature
-  ].join("|");
-  const cachedSimpleAccess = RETURN_SIMPLE_ACCESS_CACHE.get(cacheKey);
-  if (cachedSimpleAccess) {
-    return {
-      firstLevel: [...(cachedSimpleAccess.firstLevel || [])],
-      secondLevel: [...(cachedSimpleAccess.secondLevel || [])],
-      levels: (cachedSimpleAccess.levels || []).map((level) => [...level])
-    };
-  }
-
-  const computedSimpleAccess = buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, {
-    ...options,
-    maxDepth,
-    maxFieldsPerType
-  });
-  const cachedValue = {
-    firstLevel: [...(computedSimpleAccess.firstLevel || [])],
-    secondLevel: [...(computedSimpleAccess.secondLevel || [])],
-    levels: (computedSimpleAccess.levels || []).map((level) => [...level])
-  };
-  setBoundedMapValue(
-    RETURN_SIMPLE_ACCESS_CACHE,
-    cacheKey,
-    cachedValue,
-    RETURN_SIMPLE_ACCESS_CACHE_MAX_ENTRIES
-  );
-  return {
-    firstLevel: [...cachedValue.firstLevel],
-    secondLevel: [...cachedValue.secondLevel],
-    levels: cachedValue.levels.map((level) => [...level])
-  };
 }
 
 function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
@@ -6431,7 +4749,6 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
   const referenceLine = Number.isFinite(Number(options.referenceLine))
     ? Number(options.referenceLine)
     : 0;
-  const includeReturnHintContext = options.includeReturnHintContext !== false;
   const shouldResolveCurrentValue = options.showResolvedCurrentValue !== false;
   const currentValueResolution = shouldResolveCurrentValue
     ? resolveNamedArgumentCurrentValueFromSetVariable(context.argumentValue, parsed, referenceLine)
@@ -6442,7 +4759,7 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
       };
   const currentValue = currentValueResolution.value;
   const returnHintContext =
-    includeReturnHintContext && shouldResolveCurrentValue && parsed
+    shouldResolveCurrentValue && parsed
       ? await resolveReturnHintForArgumentValue(
           document,
           parsed,
@@ -8325,7 +6642,6 @@ function collectMatchingTypedReturnVariables(parsed, index, owner, line, expecte
   }
 
   const byVariable = new Map();
-  const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
   for (const assignment of parsed.keywordCallAssignments || []) {
     if (assignment.ownerId !== owner.id || assignment.startLine > line) {
       continue;
@@ -8340,14 +6656,10 @@ function collectMatchingTypedReturnVariables(parsed, index, owner, line, expecte
       continue;
     }
 
-    const returnTypeState = getCachedReturnTypeResolutionState(
-      index,
-      normalizedKeyword,
-      returnDefinition,
-      returnAnnotation,
-      subtypePolicy
-    );
-    const resolvedReturnTypeNames = returnTypeState.typeNames;
+    const returnResolutionContext = buildTypeResolutionContextFromReturnDefinition(index, returnDefinition);
+    const resolvedReturnTypeNames = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+      resolutionContext: returnResolutionContext
+    }).typeNames;
     const comparableTypeNames = uniqueStrings(
       resolvedReturnTypeNames
         .map((typeName) => normalizeComparableToken(typeName))
@@ -8781,10 +7093,6 @@ function isTypedVariableCompletionsEnabled() {
   return getConfig().get("enableTypedVariableCompletions", true);
 }
 
-function isReturnMemberCompletionsEnabled() {
-  return getConfig().get("enableReturnMemberCompletions", true);
-}
-
 function isReturnValueHoverEnabled() {
   return getConfig().get("enableReturnValueHover", true);
 }
@@ -8795,16 +7103,6 @@ function isReturnExplorerEnabled() {
 
 function isAutoSyncSelectionEnabled() {
   return getConfig().get("autoSyncSelection", true);
-}
-
-function getTypingUpdateMode() {
-  const rawMode = String(getConfig().get("typingUpdateMode", "fast") || "fast")
-    .trim()
-    .toLowerCase();
-  if (rawMode === "accurate") {
-    return "accurate";
-  }
-  return "fast";
 }
 
 function getDebounceMs() {
