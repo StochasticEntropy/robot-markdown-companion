@@ -103,6 +103,9 @@ const BUILTIN_INDEXABLE_RETURN_CONTAINERS = new Set([
   "deque",
   "listwrapper"
 ]);
+const PREWARM_MODES = new Set(["active", "allOpen"]);
+const RUNTIME_CACHE_MAX_ENTRIES_PER_BUCKET = 1200;
+const RUNTIME_HTML_CACHE_MAX_ENTRIES = 400;
 const DEBUG_PAUSED_INFO_MESSAGE =
   "Robot Companion is paused while a Robot debug session is active.";
 let ROBOT_DEBUG_PAUSED = false;
@@ -146,12 +149,22 @@ function activate(context) {
   updateRobotDebugPauseState();
   const parser = new RobotDocumentationService();
   const enumHintService = new RobotEnumHintService();
+  const runtimeCacheService = new RobotRuntimeCacheService(enumHintService);
   const previewProvider = new RobotDocPreviewViewProvider();
   const controller = new RobotDocPreviewController(parser, previewProvider);
-  const returnPreviewProvider = new RobotReturnPreviewViewProvider();
-  const returnController = new RobotReturnExplorerController(parser, enumHintService, returnPreviewProvider);
+  const returnPreviewProvider = new RobotReturnPreviewViewProvider(runtimeCacheService);
+  const returnController = new RobotReturnExplorerController(
+    parser,
+    enumHintService,
+    returnPreviewProvider,
+    runtimeCacheService
+  );
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
-  const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(parser, enumHintService);
+  const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(
+    parser,
+    enumHintService,
+    runtimeCacheService
+  );
   const handleDebugStateChange = () => {
     const wasPaused = ROBOT_DEBUG_PAUSED;
     const isPaused = updateRobotDebugPauseState();
@@ -166,6 +179,7 @@ function activate(context) {
   context.subscriptions.push(
     parser,
     enumHintService,
+    runtimeCacheService,
     previewProvider,
     controller,
     returnPreviewProvider,
@@ -179,7 +193,10 @@ function activate(context) {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.languages.registerCodeLensProvider(ROBOT_SELECTOR, codeLensProvider),
-    vscode.languages.registerHoverProvider(ROBOT_SELECTOR, new RobotDocHoverProvider(parser, enumHintService)),
+    vscode.languages.registerHoverProvider(
+      ROBOT_SELECTOR,
+      new RobotDocHoverProvider(parser, enumHintService, runtimeCacheService)
+    ),
     vscode.languages.registerCompletionItemProvider(
       ROBOT_SELECTOR,
       typedVariableCompletionProvider,
@@ -224,6 +241,7 @@ function activate(context) {
     vscode.commands.registerCommand(CMD_INVALIDATE_CACHES, async () => {
       parser.clearAll();
       enumHintService.invalidateAll();
+      runtimeCacheService.invalidateAll();
       codeLensProvider.refresh();
       controller.refresh();
       const activeEditor = vscode.window.activeTextEditor;
@@ -235,6 +253,7 @@ function activate(context) {
         }
       }
       await returnController.refresh();
+      runtimeCacheService.schedulePrewarmForOpenDocuments(parser, activeEditor?.document?.uri?.toString() || "");
       void vscode.window.showInformationMessage("Robot Companion caches invalidated.");
     }),
     parser.onDidChange(() => codeLensProvider.refresh()),
@@ -248,23 +267,43 @@ function activate(context) {
       ) {
         enumHintService.invalidateAll();
       }
+      runtimeCacheService.invalidateAll();
       codeLensProvider.refresh();
       controller.refresh();
       returnController.refresh();
+      runtimeCacheService.schedulePrewarmForOpenDocuments(
+        parser,
+        vscode.window.activeTextEditor?.document?.uri?.toString() || ""
+      );
+    }),
+    vscode.workspace.onDidOpenTextDocument((document) => {
+      if (!isRobotDocument(document)) {
+        return;
+      }
+      runtimeCacheService.schedulePrewarmForOpenDocuments(parser, document.uri.toString());
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (!isRobotDocument(event.document)) {
+        return;
+      }
+      runtimeCacheService.invalidateOnRobotDocumentChange(event);
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (isPythonDocument(document)) {
         enumHintService.invalidateForUri(document.uri);
+        runtimeCacheService.invalidateAll();
       }
     }),
     vscode.workspace.onDidCreateFiles((event) => {
       if (event.files.some((file) => isPythonPath(file.path))) {
         enumHintService.invalidateAll();
+        runtimeCacheService.invalidateAll();
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
       if (event.files.some((file) => isPythonPath(file.path))) {
         enumHintService.invalidateAll();
+        runtimeCacheService.invalidateAll();
       }
     }),
     vscode.debug.onDidStartDebugSession(() => handleDebugStateChange()),
@@ -275,6 +314,11 @@ function activate(context) {
         ROBOT_DEBUG_PAUSED = false;
       }
     }
+  );
+
+  runtimeCacheService.schedulePrewarmForOpenDocuments(
+    parser,
+    vscode.window.activeTextEditor?.document?.uri?.toString() || ""
   );
 }
 
@@ -396,13 +440,23 @@ class RobotDocumentationService {
 class RobotEnumHintService {
   constructor() {
     this._indexByWorkspace = new Map();
+    this._generationByWorkspace = new Map();
   }
 
   dispose() {
     this._indexByWorkspace.clear();
+    this._generationByWorkspace.clear();
   }
 
   invalidateAll() {
+    const workspaceKeys = new Set([
+      ...this._generationByWorkspace.keys(),
+      ...this._indexByWorkspace.keys(),
+      ...((vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.toString()) || [])
+    ]);
+    for (const key of workspaceKeys) {
+      this._bumpWorkspaceGeneration(key);
+    }
     this._indexByWorkspace.clear();
   }
 
@@ -411,7 +465,26 @@ class RobotEnumHintService {
     if (!workspaceFolder) {
       return;
     }
-    this._indexByWorkspace.delete(workspaceFolder.uri.toString());
+    const key = workspaceFolder.uri.toString();
+    this._bumpWorkspaceGeneration(key);
+    this._indexByWorkspace.delete(key);
+  }
+
+  getGenerationForDocument(document) {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!workspaceFolder) {
+      return 0;
+    }
+    return Number(this._generationByWorkspace.get(workspaceFolder.uri.toString()) || 0);
+  }
+
+  _bumpWorkspaceGeneration(workspaceKey) {
+    const key = String(workspaceKey || "").trim();
+    if (!key) {
+      return;
+    }
+    const currentGeneration = Number(this._generationByWorkspace.get(key) || 0);
+    this._generationByWorkspace.set(key, currentGeneration + 1);
   }
 
   async getIndexForDocument(document) {
@@ -675,6 +748,489 @@ class RobotEnumHintService {
   }
 }
 
+class RobotRuntimeCacheService {
+  constructor(enumHintService) {
+    this._enumHintService = enumHintService;
+    this._stateByUri = new Map();
+    this._prewarmQueue = [];
+    this._prewarmQueuedUris = new Set();
+    this._prewarmRunning = false;
+    this._prewarmTimer = undefined;
+  }
+
+  dispose() {
+    this.invalidateAll();
+  }
+
+  invalidateAll() {
+    this._stateByUri.clear();
+    this._prewarmQueue = [];
+    this._prewarmQueuedUris.clear();
+    if (this._prewarmTimer) {
+      clearTimeout(this._prewarmTimer);
+      this._prewarmTimer = undefined;
+    }
+    this._prewarmRunning = false;
+  }
+
+  invalidateForUri(uri) {
+    if (!uri) {
+      return;
+    }
+    const key = uri.toString();
+    this._stateByUri.delete(key);
+    this._prewarmQueuedUris.delete(key);
+    this._prewarmQueue = this._prewarmQueue.filter((item) => item.uri !== key);
+  }
+
+  invalidateOnRobotDocumentChange(event) {
+    if (!event || !event.document || !isRobotDocument(event.document)) {
+      return;
+    }
+    const uriKey = event.document.uri.toString();
+    const state = this._stateByUri.get(uriKey);
+    if (!state) {
+      return;
+    }
+
+    const minChangedLine = getMinChangedLine(event.contentChanges || []);
+    const structural = isStructuralRobotDocumentChange(event.contentChanges || []);
+    if (structural || !Number.isFinite(minChangedLine)) {
+      state.pendingInvalidateAll = true;
+      state.pendingInvalidateFromLine = 0;
+      return;
+    }
+    const previousMin = Number.isFinite(state.pendingInvalidateFromLine)
+      ? Number(state.pendingInvalidateFromLine)
+      : Number.MAX_SAFE_INTEGER;
+    state.pendingInvalidateFromLine = Math.max(0, Math.min(previousMin, minChangedLine));
+  }
+
+  ensureState(document, parsed) {
+    if (!document || !parsed) {
+      return undefined;
+    }
+    const uriKey = document.uri.toString();
+    const indexGeneration = this._enumHintService
+      ? this._enumHintService.getGenerationForDocument(document)
+      : 0;
+    const settingsSignature = getRuntimeCacheSettingsSignature();
+    let state = this._stateByUri.get(uriKey);
+    if (!state) {
+      state = this._createState(parsed, indexGeneration, settingsSignature);
+      this._stateByUri.set(uriKey, state);
+      return state;
+    }
+
+    const settingsChanged =
+      state.indexGeneration !== indexGeneration || state.settingsSignature !== settingsSignature;
+    if (settingsChanged) {
+      this._clearStateBuckets(state);
+      state.indexGeneration = indexGeneration;
+      state.settingsSignature = settingsSignature;
+      state.pendingInvalidateAll = false;
+      state.pendingInvalidateFromLine = undefined;
+    }
+
+    if (state.pendingInvalidateAll) {
+      this._clearStateBuckets(state);
+      state.pendingInvalidateAll = false;
+      state.pendingInvalidateFromLine = undefined;
+    } else if (Number.isFinite(state.pendingInvalidateFromLine)) {
+      this._invalidateStateBucketsFromLine(state, Number(state.pendingInvalidateFromLine));
+      state.pendingInvalidateFromLine = undefined;
+    }
+
+    if (state.parsedVersion !== parsed.version) {
+      state.lookups = this._buildLookups(parsed);
+      state.parsedVersion = parsed.version;
+    }
+
+    return state;
+  }
+
+  async getOrCompute(state, bucketName, cacheKey, computeFn, metadata = {}) {
+    if (!state || !bucketName || !cacheKey || typeof computeFn !== "function") {
+      return await computeFn();
+    }
+    const bucket = this._getBucket(state, bucketName);
+    const existingEntry = bucket.get(cacheKey);
+    if (existingEntry) {
+      return await existingEntry.value;
+    }
+
+    const valuePromise = Promise.resolve().then(computeFn);
+    bucket.set(cacheKey, {
+      value: valuePromise,
+      metadata: {
+        referenceLine: Number.isFinite(Number(metadata.referenceLine))
+          ? Math.max(0, Number(metadata.referenceLine))
+          : undefined
+      }
+    });
+    this._trimBucket(bucket, RUNTIME_CACHE_MAX_ENTRIES_PER_BUCKET);
+
+    try {
+      const resolved = await valuePromise;
+      bucket.set(cacheKey, {
+        value: resolved,
+        metadata: {
+          referenceLine: Number.isFinite(Number(metadata.referenceLine))
+            ? Math.max(0, Number(metadata.referenceLine))
+            : undefined
+        }
+      });
+      return resolved;
+    } catch (error) {
+      bucket.delete(cacheKey);
+      throw error;
+    }
+  }
+
+  getLookupState(document, parsed) {
+    const state = this.ensureState(document, parsed);
+    return state ? state.lookups : undefined;
+  }
+
+  getCachedHtml(cacheKey) {
+    const key = String(cacheKey || "");
+    if (!key) {
+      return "";
+    }
+    const state = this._stateByUri.get("__html__");
+    if (!state) {
+      return "";
+    }
+    const bucket = state.buckets?.html;
+    if (!(bucket instanceof Map)) {
+      return "";
+    }
+    return String(bucket.get(key) || "");
+  }
+
+  setCachedHtml(cacheKey, value) {
+    const key = String(cacheKey || "");
+    if (!key) {
+      return;
+    }
+    let state = this._stateByUri.get("__html__");
+    if (!state) {
+      state = {
+        buckets: {
+          html: new Map()
+        }
+      };
+      this._stateByUri.set("__html__", state);
+    }
+    const bucket = state.buckets?.html;
+    if (!(bucket instanceof Map)) {
+      return;
+    }
+    bucket.set(key, String(value || ""));
+    this._trimBucket(bucket, RUNTIME_HTML_CACHE_MAX_ENTRIES);
+  }
+
+  schedulePrewarmForOpenDocuments(parser, preferredDocumentUri = "") {
+    if (!isOpenFilePrewarmEnabled()) {
+      return;
+    }
+    const mode = getOpenFilePrewarmMode();
+    const docs = vscode.workspace.textDocuments.filter((document) => isRobotDocument(document));
+    const preferredUri = String(preferredDocumentUri || "");
+    const activeUri = vscode.window.activeTextEditor?.document?.uri?.toString() || "";
+    const orderedDocs = docs
+      .slice()
+      .sort((left, right) => {
+        const leftUri = left.uri.toString();
+        const rightUri = right.uri.toString();
+        const leftScore = leftUri === preferredUri ? 3 : leftUri === activeUri ? 2 : 0;
+        const rightScore = rightUri === preferredUri ? 3 : rightUri === activeUri ? 2 : 0;
+        if (leftScore !== rightScore) {
+          return rightScore - leftScore;
+        }
+        return leftUri.localeCompare(rightUri);
+      });
+
+    const targetDocs = mode === "active" ? orderedDocs.slice(0, 1) : orderedDocs;
+    for (const document of targetDocs) {
+      this._enqueuePrewarmDocument(document.uri.toString());
+    }
+    this._schedulePrewarmRun(parser);
+  }
+
+  _enqueuePrewarmDocument(uri) {
+    const key = String(uri || "").trim();
+    if (!key || this._prewarmQueuedUris.has(key)) {
+      return;
+    }
+    this._prewarmQueuedUris.add(key);
+    this._prewarmQueue.push({
+      uri: key,
+      enqueuedAt: Date.now()
+    });
+  }
+
+  _schedulePrewarmRun(parser) {
+    if (this._prewarmRunning || this._prewarmTimer) {
+      return;
+    }
+    this._prewarmTimer = setTimeout(() => {
+      this._prewarmTimer = undefined;
+      void this._runPrewarm(parser);
+    }, 25);
+  }
+
+  async _runPrewarm(parser) {
+    if (this._prewarmRunning || !parser) {
+      return;
+    }
+    this._prewarmRunning = true;
+    try {
+      while (this._prewarmQueue.length > 0) {
+        const next = this._prewarmQueue.shift();
+        const uri = String(next?.uri || "");
+        this._prewarmQueuedUris.delete(uri);
+        if (!uri) {
+          continue;
+        }
+        const document = vscode.workspace.textDocuments.find(
+          (candidate) => candidate.uri.toString() === uri && isRobotDocument(candidate)
+        );
+        if (!document) {
+          continue;
+        }
+        await this._prewarmDocument(document, parser);
+        await delay(0);
+      }
+    } finally {
+      this._prewarmRunning = false;
+    }
+  }
+
+  async _prewarmDocument(document, parser) {
+    const parsed = parser.getParsed(document);
+    const state = this.ensureState(document, parsed);
+    if (!state) {
+      return;
+    }
+    const prewarmSignature = `${state.parsedVersion}|${state.indexGeneration}|${state.settingsSignature}`;
+    if (state.lastPrewarmSignature === prewarmSignature) {
+      return;
+    }
+
+    const index = await this._enumHintService.getIndexForDocument(document);
+    if (!index) {
+      return;
+    }
+
+    const maxDepth = getReturnPreviewMaxDepth();
+    const maxFieldsPerType = getReturnMaxFieldsPerType();
+    let processed = 0;
+    for (const assignment of parsed.keywordCallAssignments || []) {
+      const owner = state.lookups.ownerById.get(assignment.ownerId);
+      if (!owner) {
+        continue;
+      }
+      const returnVariables = Array.isArray(assignment.returnVariables) ? assignment.returnVariables : [];
+      for (const returnVariable of returnVariables) {
+        const variableToken = String(returnVariable || "").trim();
+        if (!variableToken) {
+          continue;
+        }
+        const variableContext = {
+          owner,
+          variableToken: {
+            token: variableToken,
+            start: 0,
+            end: variableToken.length
+          },
+          assignment
+        };
+        const cacheKey = buildReturnContextCacheKey(
+          variableContext,
+          maxDepth,
+          maxFieldsPerType,
+          false
+        );
+        await this.getOrCompute(
+          state,
+          "returnPreview",
+          cacheKey,
+          () =>
+            resolveKeywordReturnPreviewFromVariableContext(
+              document,
+              parsed,
+              variableContext,
+              this._enumHintService,
+              {
+                maxDepth,
+                maxFieldsPerType,
+                includeTechnical: false,
+                runtimeCache: this,
+                precomputedIndex: index
+              }
+            ),
+          { referenceLine: assignment.startLine }
+        );
+        processed += 1;
+        if (processed % 20 === 0) {
+          await delay(0);
+        }
+      }
+    }
+
+    state.lastPrewarmSignature = prewarmSignature;
+  }
+
+  _buildLookups(parsed) {
+    const ownerById = new Map();
+    for (const owner of parsed.owners || []) {
+      if (owner && owner.id) {
+        ownerById.set(owner.id, owner);
+      }
+    }
+
+    const variableAssignmentsByOwnerAndVariable = new Map();
+    for (const assignment of parsed.variableAssignments || []) {
+      const ownerId = String(assignment.ownerId || "");
+      const normalizedVariable = String(assignment.normalizedVariable || "");
+      if (!ownerId || !normalizedVariable) {
+        continue;
+      }
+      let ownerMap = variableAssignmentsByOwnerAndVariable.get(ownerId);
+      if (!ownerMap) {
+        ownerMap = new Map();
+        variableAssignmentsByOwnerAndVariable.set(ownerId, ownerMap);
+      }
+      const items = ownerMap.get(normalizedVariable) || [];
+      items.push(assignment);
+      ownerMap.set(normalizedVariable, items);
+    }
+
+    const keywordAssignmentsByOwner = new Map();
+    const keywordAssignmentsByOwnerAndVariable = new Map();
+    for (const assignment of parsed.keywordCallAssignments || []) {
+      const ownerId = String(assignment.ownerId || "");
+      if (!ownerId) {
+        continue;
+      }
+      const byOwner = keywordAssignmentsByOwner.get(ownerId) || [];
+      byOwner.push(assignment);
+      keywordAssignmentsByOwner.set(ownerId, byOwner);
+
+      let ownerMap = keywordAssignmentsByOwnerAndVariable.get(ownerId);
+      if (!ownerMap) {
+        ownerMap = new Map();
+        keywordAssignmentsByOwnerAndVariable.set(ownerId, ownerMap);
+      }
+      const normalizedVariables = Array.isArray(assignment.normalizedReturnVariables)
+        ? assignment.normalizedReturnVariables
+        : [];
+      for (const normalizedVariable of normalizedVariables) {
+        if (!normalizedVariable) {
+          continue;
+        }
+        const items = ownerMap.get(normalizedVariable) || [];
+        items.push(assignment);
+        ownerMap.set(normalizedVariable, items);
+      }
+    }
+
+    for (const ownerMap of variableAssignmentsByOwnerAndVariable.values()) {
+      for (const items of ownerMap.values()) {
+        items.sort((left, right) => Number(left.startLine) - Number(right.startLine));
+      }
+    }
+    for (const items of keywordAssignmentsByOwner.values()) {
+      items.sort((left, right) => Number(left.startLine) - Number(right.startLine));
+    }
+    for (const ownerMap of keywordAssignmentsByOwnerAndVariable.values()) {
+      for (const items of ownerMap.values()) {
+        items.sort((left, right) => Number(left.startLine) - Number(right.startLine));
+      }
+    }
+
+    return {
+      ownerById,
+      variableAssignmentsByOwnerAndVariable,
+      keywordAssignmentsByOwner,
+      keywordAssignmentsByOwnerAndVariable
+    };
+  }
+
+  _createState(parsed, indexGeneration, settingsSignature) {
+    return {
+      uri: String(parsed.uri || ""),
+      parsedVersion: Number(parsed.version) || 0,
+      indexGeneration,
+      settingsSignature,
+      lookups: this._buildLookups(parsed),
+      buckets: {
+        returnPreview: new Map(),
+        returnHint: new Map(),
+        enumPreview: new Map(),
+        variableValue: new Map(),
+        typedVariableCompletion: new Map()
+      },
+      pendingInvalidateAll: false,
+      pendingInvalidateFromLine: undefined,
+      lastPrewarmSignature: ""
+    };
+  }
+
+  _clearStateBuckets(state) {
+    if (!state || !state.buckets) {
+      return;
+    }
+    for (const bucket of Object.values(state.buckets)) {
+      if (bucket instanceof Map) {
+        bucket.clear();
+      }
+    }
+    state.lastPrewarmSignature = "";
+  }
+
+  _invalidateStateBucketsFromLine(state, minLine) {
+    if (!state || !state.buckets) {
+      return;
+    }
+    const threshold = Math.max(0, Number(minLine) || 0);
+    for (const bucket of Object.values(state.buckets)) {
+      if (!(bucket instanceof Map)) {
+        continue;
+      }
+      for (const [key, entry] of bucket.entries()) {
+        const referenceLine = Number(entry?.metadata?.referenceLine);
+        if (!Number.isFinite(referenceLine)) {
+          continue;
+        }
+        if (referenceLine >= threshold) {
+          bucket.delete(key);
+        }
+      }
+    }
+    state.lastPrewarmSignature = "";
+  }
+
+  _getBucket(state, bucketName) {
+    if (!state.buckets[bucketName]) {
+      state.buckets[bucketName] = new Map();
+    }
+    return state.buckets[bucketName];
+  }
+
+  _trimBucket(bucket, maxEntries) {
+    if (!(bucket instanceof Map)) {
+      return;
+    }
+    const limit = Math.max(100, Number(maxEntries) || 100);
+    while (bucket.size > limit) {
+      const firstKey = bucket.keys().next().value;
+      bucket.delete(firstKey);
+    }
+  }
+}
+
 class RobotDocCodeLensProvider {
   constructor(parser) {
     this._parser = parser;
@@ -708,9 +1264,10 @@ class RobotDocCodeLensProvider {
 }
 
 class RobotDocHoverProvider {
-  constructor(parser, enumHintService) {
+  constructor(parser, enumHintService, runtimeCacheService) {
     this._parser = parser;
     this._enumHintService = enumHintService;
+    this._runtimeCacheService = runtimeCacheService;
   }
 
   async provideHover(document, position) {
@@ -721,7 +1278,13 @@ class RobotDocHoverProvider {
     const parsed = this._parser.getParsed(document);
     if (isEnumValueHoverEnabled()) {
       try {
-        const enumHover = await createEnumValueHover(document, position, this._enumHintService, parsed);
+        const enumHover = await createEnumValueHover(
+          document,
+          position,
+          this._enumHintService,
+          parsed,
+          this._runtimeCacheService
+        );
         if (enumHover) {
           return enumHover;
         }
@@ -732,7 +1295,7 @@ class RobotDocHoverProvider {
     }
 
     if (isVariableValueHoverEnabled()) {
-      const variableHover = createVariableValueHover(document, parsed, position);
+      const variableHover = createVariableValueHover(document, parsed, position, this._runtimeCacheService);
       if (variableHover) {
         return variableHover;
       }
@@ -744,7 +1307,8 @@ class RobotDocHoverProvider {
           document,
           parsed,
           position,
-          this._enumHintService
+          this._enumHintService,
+          this._runtimeCacheService
         );
         if (returnHover) {
           return returnHover;
@@ -806,9 +1370,10 @@ class RobotDocHoverProvider {
 }
 
 class RobotTypedVariableCompletionProvider {
-  constructor(parser, enumHintService) {
+  constructor(parser, enumHintService, runtimeCacheService) {
     this._parser = parser;
     this._enumHintService = enumHintService;
+    this._runtimeCacheService = runtimeCacheService;
   }
 
   async provideCompletionItems(document, position) {
@@ -849,13 +1414,37 @@ class RobotTypedVariableCompletionProvider {
       return undefined;
     }
 
-    const matchingVariables = collectMatchingTypedReturnVariables(
-      parsed,
-      index,
+    const runtimeState = this._runtimeCacheService?.ensureState(document, parsed);
+    const completionCacheKey = buildTypedVariableCompletionCacheKey(
       owner,
       position.line,
-      expectedTypeNames
+      normalizeKeywordName(argumentContext.keywordName),
+      normalizeArgumentName(argumentContext.argumentName),
+      [...expectedTypeNames].sort()
     );
+    const matchingVariables = runtimeState
+      ? await this._runtimeCacheService.getOrCompute(
+          runtimeState,
+          "typedVariableCompletion",
+          completionCacheKey,
+          () =>
+            collectMatchingTypedReturnVariables(
+              parsed,
+              index,
+              owner,
+              position.line,
+              expectedTypeNames,
+              runtimeState.lookups
+            ),
+          { referenceLine: position.line }
+        )
+      : collectMatchingTypedReturnVariables(
+          parsed,
+          index,
+          owner,
+          position.line,
+          expectedTypeNames
+        );
     if (matchingVariables.length === 0) {
       return undefined;
     }
@@ -1473,10 +2062,11 @@ class RobotDocPreviewController {
 }
 
 class RobotReturnPreviewViewProvider {
-  constructor() {
+  constructor(runtimeCacheService) {
     this._view = undefined;
     this._renderSequence = 0;
     this._state = createEmptyReturnPreviewState();
+    this._runtimeCacheService = runtimeCacheService;
   }
 
   dispose() {
@@ -1507,9 +2097,17 @@ class RobotReturnPreviewViewProvider {
     }
 
     const currentSequence = ++this._renderSequence;
-    const renderedDetailsHtml = this._state.detailsMarkdown
-      ? await renderMarkdownToHtml(this._state.detailsMarkdown)
-      : "<p class=\"muted\">No return structure selected.</p>";
+    let renderedDetailsHtml = "<p class=\"muted\">No return structure selected.</p>";
+    if (this._state.detailsMarkdown) {
+      const htmlCacheKey = `${this._state.contextKind || "unknown"}\u0000${this._state.detailsMarkdown}`;
+      const cached = this._runtimeCacheService?.getCachedHtml(htmlCacheKey);
+      if (cached) {
+        renderedDetailsHtml = cached;
+      } else {
+        renderedDetailsHtml = await renderMarkdownToHtml(this._state.detailsMarkdown);
+        this._runtimeCacheService?.setCachedHtml(htmlCacheKey, renderedDetailsHtml);
+      }
+    }
 
     if (!this._view || currentSequence !== this._renderSequence) {
       return;
@@ -1733,10 +2331,11 @@ class RobotReturnPreviewViewProvider {
 }
 
 class RobotReturnExplorerController {
-  constructor(parser, enumHintService, previewProvider) {
+  constructor(parser, enumHintService, previewProvider, runtimeCacheService) {
     this._parser = parser;
     this._enumHintService = enumHintService;
     this._previewProvider = previewProvider;
+    this._runtimeCacheService = runtimeCacheService;
     this._syncSequence = 0;
     this._suspendAutoSyncUntil = 0;
     this._debounceTimers = new Map();
@@ -1746,6 +2345,7 @@ class RobotReturnExplorerController {
       vscode.window.onDidChangeActiveTextEditor((editor) => this._onActiveEditorChanged(editor)),
       vscode.window.onDidChangeTextEditorSelection((event) => this._onSelectionChanged(event)),
       vscode.workspace.onDidChangeTextDocument((event) => this._onDocumentChanged(event)),
+      vscode.workspace.onDidOpenTextDocument((document) => this._onDocumentOpened(document)),
       vscode.workspace.onDidCloseTextDocument((document) => this._onDocumentClosed(document))
     );
 
@@ -1766,6 +2366,10 @@ class RobotReturnExplorerController {
 
   async refresh() {
     await this._syncFromActiveEditor();
+    this._runtimeCacheService?.schedulePrewarmForOpenDocuments(
+      this._parser,
+      vscode.window.activeTextEditor?.document?.uri?.toString() || ""
+    );
   }
 
   async previewKeywordArgument(payload = {}, options = {}) {
@@ -1839,7 +2443,8 @@ class RobotReturnExplorerController {
         showArgumentAssignment: false,
         showResolvedCurrentValue: false,
         showCurrentMemberMarker: false,
-        backToKeywordCommandUri
+        backToKeywordCommandUri,
+        runtimeCache: this._runtimeCacheService
       });
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
@@ -1882,7 +2487,17 @@ class RobotReturnExplorerController {
       this._previewProvider.update(createEmptyReturnPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
       return;
     }
+    if (editor && isRobotDocument(editor.document)) {
+      this._runtimeCacheService?.schedulePrewarmForOpenDocuments(this._parser, editor.document.uri.toString());
+    }
     void this._syncFromActiveEditor(editor);
+  }
+
+  _onDocumentOpened(document) {
+    if (!isRobotDocument(document) || isRobotCompanionPausedForDebug()) {
+      return;
+    }
+    this._runtimeCacheService?.schedulePrewarmForOpenDocuments(this._parser, document.uri.toString());
   }
 
   _onSelectionChanged(event) {
@@ -1908,6 +2523,8 @@ class RobotReturnExplorerController {
       return;
     }
 
+    this._runtimeCacheService?.invalidateOnRobotDocumentChange(event);
+
     if (isRobotCompanionPausedForDebug()) {
       return;
     }
@@ -1928,6 +2545,7 @@ class RobotReturnExplorerController {
         return;
       }
       void this._syncFromActiveEditor(activeEditor);
+      this._runtimeCacheService?.schedulePrewarmForOpenDocuments(this._parser, key);
     }, getDebounceMs());
 
     this._debounceTimers.set(key, timer);
@@ -1940,6 +2558,8 @@ class RobotReturnExplorerController {
       clearTimeout(timer);
       this._debounceTimers.delete(key);
     }
+
+    this._runtimeCacheService?.invalidateForUri(document.uri);
 
     if (!vscode.window.activeTextEditor) {
       this._previewProvider.update(
@@ -1972,6 +2592,7 @@ class RobotReturnExplorerController {
     }
 
     const parsed = this._parser.getParsed(editor.document);
+    this._runtimeCacheService?.ensureState(editor.document, parsed);
     let returnContext;
     try {
       returnContext = await resolveKeywordReturnPreview(
@@ -1980,8 +2601,10 @@ class RobotReturnExplorerController {
         editor.selection.active,
         this._enumHintService,
         {
-        maxDepth: getReturnPreviewMaxDepth(),
-        maxFieldsPerType: getReturnMaxFieldsPerType()
+          maxDepth: getReturnPreviewMaxDepth(),
+          maxFieldsPerType: getReturnMaxFieldsPerType(),
+          includeTechnical: false,
+          runtimeCache: this._runtimeCacheService
         }
       );
     } catch (error) {
@@ -2002,7 +2625,8 @@ class RobotReturnExplorerController {
         enumContext = await resolveEnumValuePreview(editor.document, editor.selection.active, this._enumHintService, {
           parsed,
           maxEnums: getEnumHoverMaxEnums(),
-          maxMembers: getEnumHoverMaxMembers()
+          maxMembers: getEnumHoverMaxMembers(),
+          runtimeCache: this._runtimeCacheService
         });
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
@@ -2057,6 +2681,9 @@ class RobotReturnExplorerController {
             ? "No indexed structured return type resolved from this annotation."
             : ""
       });
+      if (returnContext.technicalPending) {
+        void this._refreshReturnTechnicalDetails(editor, parsed, currentSequence);
+      }
       return;
     }
 
@@ -2103,6 +2730,51 @@ class RobotReturnExplorerController {
       createEmptyReturnPreviewState("Place cursor on a keyword token, variable, or named argument in a keyword call.")
     );
   }
+
+  async _refreshReturnTechnicalDetails(editor, parsed, expectedSequence) {
+    if (!editor || !parsed || expectedSequence !== this._syncSequence) {
+      return;
+    }
+    try {
+      const fullContext = await resolveKeywordReturnPreview(
+        editor.document,
+        parsed,
+        editor.selection.active,
+        this._enumHintService,
+        {
+          maxDepth: getReturnPreviewMaxDepth(),
+          maxFieldsPerType: getReturnMaxFieldsPerType(),
+          includeTechnical: true,
+          runtimeCache: this._runtimeCacheService
+        }
+      );
+      if (!fullContext || expectedSequence !== this._syncSequence) {
+        return;
+      }
+      this._previewProvider.update({
+        contextKind: "return",
+        fileName: parsed.fileName,
+        ownerName: fullContext.owner.name,
+        variableToken: fullContext.variableToken.token,
+        keywordName: fullContext.assignment.keywordName,
+        returnAnnotation: fullContext.returnAnnotation,
+        sourceUri: "",
+        sourceLine: undefined,
+        sourceFilePath: "",
+        sourceFunctionName: "",
+        detailsMarkdown: buildReturnPreviewMarkdown(fullContext),
+        infoMessage:
+          fullContext.returnAnnotation.length === 0
+            ? "No return annotation found for this keyword in indexed Python sources."
+            : fullContext.simpleAccess.firstLevel.length === 0 && fullContext.technicalStructureLines.length === 0
+            ? "No indexed structured return type resolved from this annotation."
+            : ""
+      });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn("[robot-companion] Return technical refresh failed:", message);
+    }
+  }
 }
 
 function buildReturnPreviewMarkdown(context) {
@@ -2142,6 +2814,10 @@ function buildReturnPreviewMarkdown(context) {
     lines.push("```text");
     lines.push(context.technicalStructureLines.join("\n"));
     lines.push("```");
+  } else if (context.technicalPending) {
+    lines.push("### Technical Details (Developer)");
+    lines.push("");
+    lines.push("_Loading technical details..._");
   }
 
   return lines.join("\n");
@@ -3115,7 +3791,7 @@ function parseSetVariableAssignment(lines, lineIndex) {
   };
 }
 
-function createVariableValueHover(document, parsed, position) {
+function createVariableValueHover(document, parsed, position, runtimeCacheService) {
   if (!parsed || !Array.isArray(parsed.owners) || !Array.isArray(parsed.variableAssignments)) {
     return undefined;
   }
@@ -3132,21 +3808,15 @@ function createVariableValueHover(document, parsed, position) {
   }
 
   const normalizedVariable = normalizeVariableLookupToken(variableToken.token);
-  let selectedAssignment = undefined;
-  for (const assignment of parsed.variableAssignments) {
-    if (assignment.ownerId !== owner.id) {
-      continue;
-    }
-    if (assignment.normalizedVariable !== normalizedVariable) {
-      continue;
-    }
-    if (assignment.startLine > position.line) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
+  const runtimeLookups = runtimeCacheService?.getLookupState(document, parsed);
+  const selectedAssignment = runtimeLookups
+    ? findLatestVariableAssignmentForOwnerFromLookups(
+        runtimeLookups,
+        owner.id,
+        normalizedVariable,
+        position.line
+      )
+    : findLatestVariableAssignmentForOwner(parsed, owner.id, normalizedVariable, position.line);
 
   if (!selectedAssignment) {
     return undefined;
@@ -3203,10 +3873,11 @@ function createVariableValueHover(document, parsed, position) {
   return new vscode.Hover(markdown, range);
 }
 
-async function createKeywordReturnHover(document, parsed, position, enumHintService) {
+async function createKeywordReturnHover(document, parsed, position, enumHintService, runtimeCacheService) {
   const context = await resolveKeywordReturnPreview(document, parsed, position, enumHintService, {
     maxDepth: getReturnHoverMaxDepth(),
-    maxFieldsPerType: getReturnMaxFieldsPerType()
+    maxFieldsPerType: getReturnMaxFieldsPerType(),
+    runtimeCache: runtimeCacheService
   });
   if (!context) {
     return undefined;
@@ -3266,12 +3937,54 @@ async function resolveKeywordReturnPreview(document, parsed, position, enumHintS
     return undefined;
   }
 
-  const variableContext = getKeywordReturnVariableContextAtPosition(document, parsed, position);
+  const runtimeCacheService = options.runtimeCache;
+  const runtimeState = runtimeCacheService?.ensureState(document, parsed);
+  const variableContext = getKeywordReturnVariableContextAtPosition(
+    document,
+    parsed,
+    position,
+    runtimeState?.lookups
+  );
   if (!variableContext) {
     return undefined;
   }
 
-  const index = await enumHintService.getIndexForDocument(document);
+  const includeTechnical = options.includeTechnical !== false;
+  const cacheKey = buildReturnContextCacheKey(
+    variableContext,
+    options.maxDepth,
+    options.maxFieldsPerType,
+    includeTechnical
+  );
+  if (runtimeState && runtimeCacheService) {
+    return await runtimeCacheService.getOrCompute(
+      runtimeState,
+      "returnPreview",
+      cacheKey,
+      () =>
+        resolveKeywordReturnPreviewFromVariableContext(document, parsed, variableContext, enumHintService, options),
+      { referenceLine: variableContext.assignment.startLine }
+    );
+  }
+
+  return await resolveKeywordReturnPreviewFromVariableContext(
+    document,
+    parsed,
+    variableContext,
+    enumHintService,
+    options
+  );
+}
+
+async function resolveKeywordReturnPreviewFromVariableContext(
+  document,
+  parsed,
+  variableContext,
+  enumHintService,
+  options = {}
+) {
+  const includeTechnical = options.includeTechnical !== false;
+  const index = options.precomputedIndex || (await enumHintService.getIndexForDocument(document));
   if (!index) {
     return undefined;
   }
@@ -3293,19 +4006,22 @@ async function resolveKeywordReturnPreview(document, parsed, position, enumHintS
     subtypePolicy,
     typePreferencesByName: returnTypeResolution.typePreferencesByName,
     resolutionContext: returnResolutionContext,
+    maxDepth: Math.max(1, Number(options.maxDepth) || 1),
     maxFieldsPerType: Math.max(1, Number(options.maxFieldsPerType) || 1)
   });
-  const technicalStructureLines = buildReturnStructureLines(
-    rootTypeNames,
-    index,
-    {
-      maxDepth: getReturnTechnicalMaxDepth(),
-      maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
-      typePreferencesByName: returnTypeResolution.typePreferencesByName,
-      resolutionContext: returnResolutionContext
-    },
-    "technical"
-  );
+  const technicalStructureLines = includeTechnical
+    ? buildReturnStructureLines(
+        rootTypeNames,
+        index,
+        {
+          maxDepth: getReturnTechnicalMaxDepth(),
+          maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
+          typePreferencesByName: returnTypeResolution.typePreferencesByName,
+          resolutionContext: returnResolutionContext
+        },
+        "technical"
+      )
+    : [];
 
   return {
     ...variableContext,
@@ -3314,11 +4030,12 @@ async function resolveKeywordReturnPreview(document, parsed, position, enumHintS
     returnDefinition,
     rootTypeNames,
     simpleAccess,
-    technicalStructureLines
+    technicalStructureLines,
+    technicalPending: !includeTechnical && rootTypeNames.length > 0
   };
 }
 
-function getKeywordReturnVariableContextAtPosition(document, parsed, position) {
+function getKeywordReturnVariableContextAtPosition(document, parsed, position, runtimeLookups) {
   if (!parsed || !Array.isArray(parsed.keywordCallAssignments) || !Array.isArray(parsed.owners)) {
     return undefined;
   }
@@ -3335,21 +4052,9 @@ function getKeywordReturnVariableContextAtPosition(document, parsed, position) {
   }
 
   const normalizedVariable = normalizeVariableLookupToken(variableToken.token);
-  let selectedAssignment = undefined;
-  for (const assignment of parsed.keywordCallAssignments) {
-    if (assignment.ownerId !== owner.id) {
-      continue;
-    }
-    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
-      continue;
-    }
-    if (assignment.startLine > position.line) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
+  const selectedAssignment = runtimeLookups
+    ? findLatestKeywordCallAssignmentForOwnerFromLookups(runtimeLookups, owner.id, normalizedVariable, position.line)
+    : findLatestKeywordCallAssignmentForOwner(parsed, owner.id, normalizedVariable, position.line);
 
   if (!selectedAssignment) {
     return undefined;
@@ -3362,7 +4067,7 @@ function getKeywordReturnVariableContextAtPosition(document, parsed, position) {
   };
 }
 
-function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, line) {
+function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, line, runtimeLookups) {
   const rawValue = String(argumentValue || "").trim();
   const fallback = {
     value: rawValue,
@@ -3384,21 +4089,9 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, 
   }
 
   const normalizedVariable = normalizeVariableLookupToken(rawValue);
-  let selectedAssignment = undefined;
-  for (const assignment of parsed.variableAssignments) {
-    if (assignment.ownerId !== owner.id) {
-      continue;
-    }
-    if (assignment.normalizedVariable !== normalizedVariable) {
-      continue;
-    }
-    if (assignment.startLine > line) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
+  const selectedAssignment = runtimeLookups
+    ? findLatestVariableAssignmentForOwnerFromLookups(runtimeLookups, owner.id, normalizedVariable, line)
+    : findLatestVariableAssignmentForOwner(parsed, owner.id, normalizedVariable, line);
 
   if (!selectedAssignment) {
     return fallback;
@@ -3428,7 +4121,14 @@ function extractCurrentValueFromSetVariableAssignment(valueRaw) {
   return parsePythonLiteral(valueLines[0]);
 }
 
-async function resolveReturnHintForArgumentValue(document, parsed, context, position, enumHintService) {
+async function resolveReturnHintForArgumentValue(
+  document,
+  parsed,
+  context,
+  position,
+  enumHintService,
+  runtimeCacheService
+) {
   if (!document || !parsed || !context || !position || !enumHintService) {
     return undefined;
   }
@@ -3448,29 +4148,61 @@ async function resolveReturnHintForArgumentValue(document, parsed, context, posi
   }
 
   const normalizedVariable = normalizeVariableLookupToken(rawArgumentValue);
-  let selectedAssignment = undefined;
-  for (const assignment of parsed.keywordCallAssignments) {
-    if (assignment.ownerId !== owner.id) {
-      continue;
-    }
-    if (!Array.isArray(assignment.normalizedReturnVariables)) {
-      continue;
-    }
-    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
-      continue;
-    }
-    if (assignment.startLine > position.line) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
+  const runtimeState = runtimeCacheService?.ensureState(document, parsed);
+  const runtimeLookups = runtimeState?.lookups;
+  const selectedAssignment = runtimeLookups
+    ? findLatestKeywordCallAssignmentForOwnerFromLookups(runtimeLookups, owner.id, normalizedVariable, position.line)
+    : findLatestKeywordCallAssignmentForOwner(parsed, owner.id, normalizedVariable, position.line);
 
   if (!selectedAssignment) {
     return undefined;
   }
 
+  const cacheKey = buildReturnHintContextCacheKey(
+    owner.id,
+    normalizedVariable,
+    selectedAssignment.id,
+    getReturnHintArgumentMaxDepth()
+  );
+  if (runtimeState && runtimeCacheService) {
+    return await runtimeCacheService.getOrCompute(
+      runtimeState,
+      "returnHint",
+      cacheKey,
+      () =>
+        resolveReturnHintForArgumentValueFromAssignment(
+          document,
+          rawArgumentValue,
+          context,
+          position,
+          owner,
+          selectedAssignment,
+          enumHintService
+        ),
+      { referenceLine: position.line }
+    );
+  }
+
+  return await resolveReturnHintForArgumentValueFromAssignment(
+    document,
+    rawArgumentValue,
+    context,
+    position,
+    owner,
+    selectedAssignment,
+    enumHintService
+  );
+}
+
+async function resolveReturnHintForArgumentValueFromAssignment(
+  document,
+  rawArgumentValue,
+  context,
+  position,
+  owner,
+  selectedAssignment,
+  enumHintService
+) {
   const index = await enumHintService.getIndexForDocument(document);
   if (!index) {
     return undefined;
@@ -4585,6 +5317,222 @@ function findOwnerForLine(owners, line) {
   return owners.find((owner) => line >= owner.startLine && line <= owner.endLine);
 }
 
+function findLatestAssignmentBeforeLine(assignments, line) {
+  if (!Array.isArray(assignments) || assignments.length === 0) {
+    return undefined;
+  }
+  const targetLine = Number.isFinite(Number(line)) ? Number(line) : Number.MAX_SAFE_INTEGER;
+  let left = 0;
+  let right = assignments.length - 1;
+  let best = -1;
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2);
+    const assignmentLine = Number(assignments[middle]?.startLine);
+    if (!Number.isFinite(assignmentLine)) {
+      left = middle + 1;
+      continue;
+    }
+    if (assignmentLine <= targetLine) {
+      best = middle;
+      left = middle + 1;
+    } else {
+      right = middle - 1;
+    }
+  }
+  return best >= 0 ? assignments[best] : undefined;
+}
+
+function findLatestVariableAssignmentForOwner(parsed, ownerId, normalizedVariable, line) {
+  if (!parsed || !ownerId || !normalizedVariable) {
+    return undefined;
+  }
+  let selectedAssignment = undefined;
+  for (const assignment of parsed.variableAssignments || []) {
+    if (assignment.ownerId !== ownerId) {
+      continue;
+    }
+    if (assignment.normalizedVariable !== normalizedVariable) {
+      continue;
+    }
+    if (assignment.startLine > line) {
+      continue;
+    }
+    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
+      selectedAssignment = assignment;
+    }
+  }
+  return selectedAssignment;
+}
+
+function findLatestVariableAssignmentForOwnerFromLookups(runtimeLookups, ownerId, normalizedVariable, line) {
+  if (!runtimeLookups || !ownerId || !normalizedVariable) {
+    return undefined;
+  }
+  const ownerMap = runtimeLookups.variableAssignmentsByOwnerAndVariable?.get(ownerId);
+  const assignments = ownerMap?.get(normalizedVariable) || [];
+  return findLatestAssignmentBeforeLine(assignments, line);
+}
+
+function findLatestKeywordCallAssignmentForOwner(parsed, ownerId, normalizedVariable, line) {
+  if (!parsed || !ownerId || !normalizedVariable) {
+    return undefined;
+  }
+  let selectedAssignment = undefined;
+  for (const assignment of parsed.keywordCallAssignments || []) {
+    if (assignment.ownerId !== ownerId) {
+      continue;
+    }
+    if (!Array.isArray(assignment.normalizedReturnVariables)) {
+      continue;
+    }
+    if (!assignment.normalizedReturnVariables.includes(normalizedVariable)) {
+      continue;
+    }
+    if (assignment.startLine > line) {
+      continue;
+    }
+    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
+      selectedAssignment = assignment;
+    }
+  }
+  return selectedAssignment;
+}
+
+function findLatestKeywordCallAssignmentForOwnerFromLookups(runtimeLookups, ownerId, normalizedVariable, line) {
+  if (!runtimeLookups || !ownerId || !normalizedVariable) {
+    return undefined;
+  }
+  const ownerMap = runtimeLookups.keywordAssignmentsByOwnerAndVariable?.get(ownerId);
+  const assignments = ownerMap?.get(normalizedVariable) || [];
+  return findLatestAssignmentBeforeLine(assignments, line);
+}
+
+function buildReturnContextCacheKey(variableContext, maxDepth, maxFieldsPerType, includeTechnical = true) {
+  return [
+    "return",
+    String(variableContext?.owner?.id || ""),
+    String(variableContext?.assignment?.id || ""),
+    normalizeVariableLookupToken(variableContext?.variableToken?.token || ""),
+    Math.max(0, Number(maxDepth) || 0),
+    Math.max(1, Number(maxFieldsPerType) || 1),
+    includeTechnical ? "full" : "simple",
+    getReturnTechnicalMaxDepth(),
+    getReturnTechnicalMaxFieldsPerType(),
+    getReturnSubtypeResolutionMode(),
+    getReturnSubtypeIncludeContainers().join(","),
+    getReturnSubtypeExcludeContainers().join(",")
+  ].join("|");
+}
+
+function buildReturnHintContextCacheKey(ownerId, normalizedVariable, assignmentId, maxDepth) {
+  return [
+    "return-hint",
+    String(ownerId || ""),
+    String(normalizedVariable || ""),
+    String(assignmentId || ""),
+    Math.max(1, Number(maxDepth) || 1),
+    getReturnMaxFieldsPerType(),
+    getReturnSubtypeResolutionMode(),
+    getReturnSubtypeIncludeContainers().join(","),
+    getReturnSubtypeExcludeContainers().join(",")
+  ].join("|");
+}
+
+function buildEnumPreviewContextCacheKey(context, referenceLine, options = {}) {
+  const maxEnums = Math.max(1, Number(options.maxEnums) || getEnumHoverMaxEnums());
+  const maxMembers = Math.max(1, Number(options.maxMembers) || getEnumHoverMaxMembers());
+  return [
+    "enum",
+    normalizeKeywordName(context.keywordName),
+    normalizeArgumentName(context.argumentName),
+    String(context.argumentValue || ""),
+    Math.max(0, Number(referenceLine) || 0),
+    options.showArgumentAssignment === false ? "0" : "1",
+    options.showResolvedCurrentValue === false ? "0" : "1",
+    options.showCurrentMemberMarker === false ? "0" : "1",
+    isEnumArgumentFallbackEnabled() ? "1" : "0",
+    maxEnums,
+    maxMembers
+  ].join("|");
+}
+
+function buildTypedVariableCompletionCacheKey(
+  owner,
+  line,
+  normalizedKeyword,
+  normalizedArgument,
+  expectedTypeNames
+) {
+  return [
+    "typed-completion",
+    String(owner?.id || ""),
+    Math.max(0, Number(line) || 0),
+    String(normalizedKeyword || ""),
+    String(normalizedArgument || ""),
+    (expectedTypeNames || []).join(",")
+  ].join("|");
+}
+
+function getRuntimeCacheSettingsSignature() {
+  return JSON.stringify({
+    enumFallback: isEnumArgumentFallbackEnabled(),
+    enumMaxEnums: getEnumHoverMaxEnums(),
+    enumMaxMembers: getEnumHoverMaxMembers(),
+    returnSubtypeMode: getReturnSubtypeResolutionMode(),
+    returnSubtypeInclude: getReturnSubtypeIncludeContainers(),
+    returnSubtypeExclude: getReturnSubtypeExcludeContainers(),
+    returnMaxFieldsPerType: getReturnMaxFieldsPerType(),
+    returnHintArgumentMaxDepth: getReturnHintArgumentMaxDepth(),
+    returnPreviewMaxDepth: getReturnPreviewMaxDepth(),
+    returnTechnicalMaxDepth: getReturnTechnicalMaxDepth(),
+    returnTechnicalMaxFieldsPerType: getReturnTechnicalMaxFieldsPerType()
+  });
+}
+
+function getMinChangedLine(contentChanges) {
+  if (!Array.isArray(contentChanges) || contentChanges.length === 0) {
+    return undefined;
+  }
+  let minLine = Number.POSITIVE_INFINITY;
+  for (const change of contentChanges) {
+    const line = Number(change?.range?.start?.line);
+    if (Number.isFinite(line)) {
+      minLine = Math.min(minLine, line);
+    }
+  }
+  if (!Number.isFinite(minLine)) {
+    return undefined;
+  }
+  return minLine;
+}
+
+function isStructuralRobotDocumentChange(contentChanges) {
+  if (!Array.isArray(contentChanges) || contentChanges.length === 0) {
+    return false;
+  }
+  for (const change of contentChanges) {
+    const text = String(change?.text || "");
+    const startLine = Number(change?.range?.start?.line);
+    const endLine = Number(change?.range?.end?.line);
+    if (text.includes("\n") || (Number.isFinite(startLine) && Number.isFinite(endLine) && endLine !== startLine)) {
+      return true;
+    }
+    if (/^\s*\*{3}\s*[^*]+\s*\*{3}\s*$/m.test(text)) {
+      return true;
+    }
+    if (/^\s*\[[A-Za-z ]+\]/m.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
+}
+
 function getVariableTokenAtPosition(lineText, character) {
   const source = String(lineText || "");
   const pattern = /[$@&%]\{[^}\r\n]+\}/g;
@@ -4639,11 +5587,12 @@ function stripInlineRobotComment(value) {
   return String(value || "").replace(/\s{2,}#.*$/, "");
 }
 
-async function createEnumValueHover(document, position, enumHintService, parsed) {
+async function createEnumValueHover(document, position, enumHintService, parsed, runtimeCacheService) {
   const context = await resolveEnumValuePreview(document, position, enumHintService, {
     parsed,
     maxEnums: getEnumHoverMaxEnums(),
-    maxMembers: getEnumHoverMaxMembers()
+    maxMembers: getEnumHoverMaxMembers(),
+    runtimeCache: runtimeCacheService
   });
   if (!context) {
     return undefined;
@@ -4861,9 +5810,34 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
   const referenceLine = Number.isFinite(Number(options.referenceLine))
     ? Number(options.referenceLine)
     : 0;
+  const runtimeCacheService = options.runtimeCache;
+  const runtimeState = parsed ? runtimeCacheService?.ensureState(document, parsed) : undefined;
+  if (runtimeState && runtimeCacheService && options.__skipCache !== true) {
+    const cacheKey = buildEnumPreviewContextCacheKey(context, referenceLine, options);
+    return await runtimeCacheService.getOrCompute(
+      runtimeState,
+      "enumPreview",
+      cacheKey,
+      () =>
+        resolveEnumValuePreviewFromContext(document, enumHintService, context, {
+          ...options,
+          __skipCache: true,
+          runtimeCache: runtimeCacheService,
+          parsed,
+          referenceLine
+        }),
+      { referenceLine }
+    );
+  }
+
   const shouldResolveCurrentValue = options.showResolvedCurrentValue !== false;
   const currentValueResolution = shouldResolveCurrentValue
-    ? resolveNamedArgumentCurrentValueFromSetVariable(context.argumentValue, parsed, referenceLine)
+    ? resolveNamedArgumentCurrentValueFromSetVariable(
+        context.argumentValue,
+        parsed,
+        referenceLine,
+        runtimeState?.lookups
+      )
     : {
         value: String(context.argumentValue || "").trim(),
         source: "argument",
@@ -4880,7 +5854,8 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
             line: referenceLine,
             character: Math.max(0, Number(context.hoverStart) || 0)
           },
-          enumHintService
+          enumHintService,
+          runtimeCacheService
         )
       : undefined;
 
@@ -6741,7 +7716,14 @@ function resolveExpectedArgumentTypeNames(index, normalizedKeyword, normalizedAr
   return expectedTypeNames;
 }
 
-function collectMatchingTypedReturnVariables(parsed, index, owner, line, expectedTypeNames) {
+function collectMatchingTypedReturnVariables(
+  parsed,
+  index,
+  owner,
+  line,
+  expectedTypeNames,
+  runtimeLookups = undefined
+) {
   if (
     !parsed ||
     !index ||
@@ -6754,7 +7736,10 @@ function collectMatchingTypedReturnVariables(parsed, index, owner, line, expecte
   }
 
   const byVariable = new Map();
-  for (const assignment of parsed.keywordCallAssignments || []) {
+  const assignments = runtimeLookups
+    ? runtimeLookups.keywordAssignmentsByOwner?.get(owner.id) || []
+    : parsed.keywordCallAssignments || [];
+  for (const assignment of assignments) {
     if (assignment.ownerId !== owner.id || assignment.startLine > line) {
       continue;
     }
@@ -7215,6 +8200,20 @@ function isReturnExplorerEnabled() {
 
 function isAutoSyncSelectionEnabled() {
   return getConfig().get("autoSyncSelection", true);
+}
+
+function isOpenFilePrewarmEnabled() {
+  return getConfig().get("enableOpenFilePrewarm", true);
+}
+
+function getOpenFilePrewarmMode() {
+  const rawMode = String(getConfig().get("prewarmMode", "allOpen") || "allOpen")
+    .trim()
+    .toLowerCase();
+  if (PREWARM_MODES.has(rawMode)) {
+    return rawMode;
+  }
+  return "allOpen";
 }
 
 function getDebounceMs() {

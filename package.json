@@ -186,6 +186,20 @@
           "default": true,
           "description": "Synchronize the side preview with the cursor position in active .robot files."
         },
+        "robotCompanion.enableOpenFilePrewarm": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prewarm runtime caches for open Robot files so side panel/hover data is available faster."
+        },
+        "robotCompanion.prewarmMode": {
+          "type": "string",
+          "enum": [
+            "allOpen",
+            "active"
+          ],
+          "default": "allOpen",
+          "description": "Choose whether prewarming runs for all open Robot files or only the active one."
+        },
         "robotCompanion.debounceMs": {
           "type": "number",
           "default": 200,

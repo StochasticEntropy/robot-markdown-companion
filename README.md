@@ -38,6 +38,8 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
 - `robotCompanion.indexImportFolderPatterns`
 - `robotCompanion.indexExcludeFolderPatterns`
 - `robotCompanion.autoSyncSelection`
+- `robotCompanion.enableOpenFilePrewarm`
+- `robotCompanion.prewarmMode`
 - `robotCompanion.debounceMs`
 - `robotCompanion.hoverLineLimit`
 - `robotCompanion.enumHoverMaxEnums`
@@ -62,6 +64,7 @@ Index pattern examples:
 
 - Extension behavior is read-only.
 - Caches (documentation + enum/type/return index) can be reset via the invalidate command.
+- Runtime caches for open Robot files are prewarmed by default so return/argument previews appear faster; technical return details load lazily.
 - Keyword-doc view is best-effort: ambiguous matches or parse quirks show a warning banner, but content still renders.
 - Keyword-doc entries include jump links to Python keyword definitions when source locations are indexed.
 - Release verification guide: `docs/RELEASE_CHECKLIST.md`.
