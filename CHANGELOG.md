@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Added Robot-debug pause mode to avoid interference with RobotCode debugging:
+  - Robot Companion hover, completion, and code lens providers are suspended while a Robot debug session is active.
+  - Documentation Preview and Return Explorer auto-sync/update loops are paused during Robot debug sessions.
+  - Side views show a clear paused message and automatically resume when the debug session ends.
+
 ## 0.2.11
 
 - Added import-aware return type resolution to reduce same-name type collisions across large codebases:

@@ -103,8 +103,47 @@ const BUILTIN_INDEXABLE_RETURN_CONTAINERS = new Set([
   "deque",
   "listwrapper"
 ]);
+const DEBUG_PAUSED_INFO_MESSAGE =
+  "Robot Companion is paused while a Robot debug session is active.";
+let ROBOT_DEBUG_PAUSED = false;
+
+function normalizeDebugToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function isRobotDebugSession(session) {
+  if (!session) {
+    return false;
+  }
+  const typeToken = normalizeDebugToken(session.type || session.configuration?.type);
+  const nameToken = normalizeDebugToken(session.name || session.configuration?.name);
+  return typeToken.includes("robot") || nameToken.includes("robot");
+}
+
+function computeRobotDebugPauseState() {
+  const sessions = [];
+  if (vscode.debug.activeDebugSession) {
+    sessions.push(vscode.debug.activeDebugSession);
+  }
+  for (const session of vscode.debug.sessions || []) {
+    sessions.push(session);
+  }
+  return sessions.some((session) => isRobotDebugSession(session));
+}
+
+function updateRobotDebugPauseState() {
+  ROBOT_DEBUG_PAUSED = computeRobotDebugPauseState();
+  return ROBOT_DEBUG_PAUSED;
+}
+
+function isRobotCompanionPausedForDebug() {
+  return ROBOT_DEBUG_PAUSED;
+}
 
 function activate(context) {
+  updateRobotDebugPauseState();
   const parser = new RobotDocumentationService();
   const enumHintService = new RobotEnumHintService();
   const previewProvider = new RobotDocPreviewViewProvider();
@@ -113,6 +152,16 @@ function activate(context) {
   const returnController = new RobotReturnExplorerController(parser, enumHintService, returnPreviewProvider);
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
   const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(parser, enumHintService);
+  const handleDebugStateChange = () => {
+    const wasPaused = ROBOT_DEBUG_PAUSED;
+    const isPaused = updateRobotDebugPauseState();
+    if (wasPaused === isPaused) {
+      return;
+    }
+    codeLensProvider.refresh();
+    controller.refresh();
+    void returnController.refresh();
+  };
 
   context.subscriptions.push(
     parser,
@@ -217,7 +266,15 @@ function activate(context) {
       if (event.files.some((file) => isPythonPath(file.path))) {
         enumHintService.invalidateAll();
       }
-    })
+    }),
+    vscode.debug.onDidStartDebugSession(() => handleDebugStateChange()),
+    vscode.debug.onDidTerminateDebugSession(() => handleDebugStateChange()),
+    vscode.debug.onDidChangeActiveDebugSession(() => handleDebugStateChange()),
+    {
+      dispose() {
+        ROBOT_DEBUG_PAUSED = false;
+      }
+    }
   );
 }
 
@@ -634,7 +691,7 @@ class RobotDocCodeLensProvider {
   }
 
   provideCodeLenses(document) {
-    if (!isRobotDocument(document) || !isCodeLensEnabled()) {
+    if (!isRobotDocument(document) || !isCodeLensEnabled() || isRobotCompanionPausedForDebug()) {
       return [];
     }
 
@@ -657,7 +714,7 @@ class RobotDocHoverProvider {
   }
 
   async provideHover(document, position) {
-    if (!isRobotDocument(document)) {
+    if (!isRobotDocument(document) || isRobotCompanionPausedForDebug()) {
       return undefined;
     }
 
@@ -755,7 +812,11 @@ class RobotTypedVariableCompletionProvider {
   }
 
   async provideCompletionItems(document, position) {
-    if (!isRobotDocument(document) || !isTypedVariableCompletionsEnabled()) {
+    if (
+      !isRobotDocument(document) ||
+      !isTypedVariableCompletionsEnabled() ||
+      isRobotCompanionPausedForDebug()
+    ) {
       return undefined;
     }
 
@@ -1173,6 +1234,12 @@ class RobotDocPreviewController {
   }
 
   async openCurrentBlock() {
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      await this._focusPreviewView();
+      return;
+    }
+
     const editor = vscode.window.activeTextEditor;
     if (!editor || !isRobotDocument(editor.document)) {
       this._previewProvider.update(
@@ -1236,6 +1303,11 @@ class RobotDocPreviewController {
   }
 
   _onActiveEditorChanged(editor) {
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      return;
+    }
+
     if (!editor) {
       this._previewProvider.update(createEmptyPreviewState("Open a .robot file to preview documentation."));
       return;
@@ -1245,6 +1317,10 @@ class RobotDocPreviewController {
   }
 
   _onSelectionChanged(event) {
+    if (isRobotCompanionPausedForDebug()) {
+      return;
+    }
+
     if (!isAutoSyncSelectionEnabled()) {
       return;
     }
@@ -1273,6 +1349,10 @@ class RobotDocPreviewController {
       return;
     }
 
+    if (isRobotCompanionPausedForDebug()) {
+      return;
+    }
+
     const key = event.document.uri.toString();
     const previousTimer = this._debounceTimers.get(key);
     if (previousTimer) {
@@ -1281,6 +1361,9 @@ class RobotDocPreviewController {
 
     const timer = setTimeout(() => {
       this._debounceTimers.delete(key);
+      if (isRobotCompanionPausedForDebug()) {
+        return;
+      }
       this._parser.parse(event.document);
 
       const activeEditor = vscode.window.activeTextEditor;
@@ -1316,6 +1399,11 @@ class RobotDocPreviewController {
   }
 
   _syncFromActiveEditor(editor = vscode.window.activeTextEditor) {
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      return;
+    }
+
     if (!editor || !isRobotDocument(editor.document)) {
       this._previewProvider.update(createEmptyPreviewState("Open a .robot file to preview documentation."));
       return;
@@ -1681,6 +1769,11 @@ class RobotReturnExplorerController {
   }
 
   async previewKeywordArgument(payload = {}, options = {}) {
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyReturnPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      return;
+    }
+
     this._suspendAutoSyncUntil = Date.now() + 400;
     const uriString = String(payload?.documentUri || "").trim();
     const argumentName = String(payload?.argumentName || "").trim();
@@ -1785,11 +1878,18 @@ class RobotReturnExplorerController {
     if (Date.now() < this._suspendAutoSyncUntil) {
       return;
     }
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyReturnPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      return;
+    }
     void this._syncFromActiveEditor(editor);
   }
 
   _onSelectionChanged(event) {
     if (Date.now() < this._suspendAutoSyncUntil) {
+      return;
+    }
+    if (isRobotCompanionPausedForDebug()) {
       return;
     }
     if (!isAutoSyncSelectionEnabled()) {
@@ -1808,6 +1908,10 @@ class RobotReturnExplorerController {
       return;
     }
 
+    if (isRobotCompanionPausedForDebug()) {
+      return;
+    }
+
     const key = event.document.uri.toString();
     const previousTimer = this._debounceTimers.get(key);
     if (previousTimer) {
@@ -1816,6 +1920,9 @@ class RobotReturnExplorerController {
 
     const timer = setTimeout(() => {
       this._debounceTimers.delete(key);
+      if (isRobotCompanionPausedForDebug()) {
+        return;
+      }
       const activeEditor = vscode.window.activeTextEditor;
       if (!activeEditor || activeEditor.document.uri.toString() !== key) {
         return;
@@ -1845,6 +1952,11 @@ class RobotReturnExplorerController {
 
   async _syncFromActiveEditor(editor = vscode.window.activeTextEditor) {
     const currentSequence = ++this._syncSequence;
+    if (isRobotCompanionPausedForDebug()) {
+      this._previewProvider.update(createEmptyReturnPreviewState(DEBUG_PAUSED_INFO_MESSAGE));
+      return;
+    }
+
     if (!isReturnExplorerEnabled()) {
       this._previewProvider.update(createEmptyReturnPreviewState("Return explorer is disabled in settings."));
       return;
