@@ -1603,7 +1603,7 @@ class RobotRuntimeCacheService {
           variableContext,
           maxDepth,
           maxFieldsPerType,
-          false
+          true
         );
         await this.getOrCompute(
           state,
@@ -1618,7 +1618,7 @@ class RobotRuntimeCacheService {
               {
                 maxDepth,
                 maxFieldsPerType,
-                includeTechnical: false,
+                includeTechnical: true,
                 runtimeCache: this,
                 precomputedIndex: index,
                 returnComputeWorker: this._returnComputeWorker
@@ -3303,7 +3303,6 @@ class RobotReturnExplorerController {
       const returnResolveOptions = {
         maxDepth: getReturnPreviewMaxDepth(),
         maxFieldsPerType: getReturnMaxFieldsPerType(),
-        includeTechnical: false,
         runtimeCache: this._runtimeCacheService,
         returnComputeWorker: this._returnComputeWorker
       };
@@ -3316,12 +3315,39 @@ class RobotReturnExplorerController {
           this._enumHintService,
           {
             ...returnResolveOptions,
+            includeTechnical: true,
             cacheOnly: true
           }
         );
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
         console.warn("[robot-companion] Return explorer cache lookup failed:", message);
+      }
+
+      if (currentSequence !== this._syncSequence) {
+        return;
+      }
+
+      if (returnContext) {
+        this._applyReturnPreviewContext(parsed, returnContext);
+        return;
+      }
+
+      try {
+        returnContext = await resolveKeywordReturnPreview(
+          editor.document,
+          parsed,
+          editor.selection.active,
+          this._enumHintService,
+          {
+            ...returnResolveOptions,
+            includeTechnical: false,
+            cacheOnly: true
+          }
+        );
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        console.warn("[robot-companion] Return explorer simple cache lookup failed:", message);
       }
 
       if (currentSequence !== this._syncSequence) {
@@ -3437,7 +3463,7 @@ class RobotReturnExplorerController {
         {
           maxDepth: getReturnPreviewMaxDepth(),
           maxFieldsPerType: getReturnMaxFieldsPerType(),
-          includeTechnical: false,
+          includeTechnical: true,
           runtimeCache: this._runtimeCacheService,
           returnComputeWorker: this._returnComputeWorker
         }
@@ -3446,9 +3472,6 @@ class RobotReturnExplorerController {
         return;
       }
       this._applyReturnPreviewContext(parsed, fullContext);
-      if (fullContext.technicalPending) {
-        void this._refreshReturnTechnicalDetails(editor, parsed, expectedSequence);
-      }
     };
 
     if (this._runtimeCacheService) {
@@ -6545,7 +6568,9 @@ function getRuntimeCacheSettingsSignature() {
     returnHintArgumentMaxDepth: getReturnHintArgumentMaxDepth(),
     returnPreviewMaxDepth: getReturnPreviewMaxDepth(),
     returnTechnicalMaxDepth: getReturnTechnicalMaxDepth(),
-    returnTechnicalMaxFieldsPerType: getReturnTechnicalMaxFieldsPerType()
+    returnTechnicalMaxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
+    returnTypeDiskCacheEnabled: isReturnTypeDiskCacheEnabled(),
+    returnTypeCacheMaxEntries: getReturnTypeCacheMaxEntries()
   });
 }
 
@@ -9390,9 +9415,9 @@ function getReturnHoverMaxDepth() {
 }
 
 function getReturnPreviewMaxDepth() {
-  const raw = Number(getConfig().get("returnPreviewMaxDepth", 1));
+  const raw = Number(getConfig().get("returnPreviewMaxDepth", 2));
   if (!Number.isFinite(raw)) {
-    return 1;
+    return 2;
   }
   return Math.max(0, Math.min(12, Math.round(raw)));
 }

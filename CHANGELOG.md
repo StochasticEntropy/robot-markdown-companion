@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6
+
+- Changed default `robotCompanion.returnPreviewMaxDepth` from `1` to `2`.
+- Default Return Explorer rendering now includes second-level access paths, and prewarm/type cache now populate second-level return access by default.
+
 ## 0.4.5
 
 - Added type-scoped return caching in the worker so repeated variables resolving to the same return type reuse one compute result.
@@ -10,6 +15,7 @@
 - Unified worker-backed return reuse across all return surfaces:
   - return hover / Return Explorer
   - return hint for argument values inside enum/argument preview flows.
+- Return Explorer cache-first behavior now prefers full (technical-included) cached contexts, and prewarm populates full return contexts to avoid repeated on-demand technical loading for already-warmed types.
 - `Robot Companion: Invalidate All Caches` now also clears persisted return-type cache files.
 
 ## 0.4.4
