@@ -1,7 +1,7 @@
 # Robot Companion - Internal Cache Notes
 
 Last updated: 2026-04-02  
-Branch baseline: `caching` / `v0.4.5`
+Branch baseline: `caching` / `v0.4.6`
 
 This document describes the current cache behavior in `src/core/extension.js`:
 - what is cached
@@ -79,6 +79,9 @@ Current buckets:
   - used for enum hover + enum side panel details
 - `typedVariableCompletion`
   - used for type-matched variable completion in named argument values
+- `returnMemberCompletion`
+  - used for `${var.}` / `${var.}` member completion in named argument values
+  - cache-first path through worker type cache; stores candidate lists per owner/assignment/path prefix
 - `variableValue`
   - currently defined but not populated by current code paths
 
@@ -146,6 +149,7 @@ Settings signature currently includes:
 - enum fallback and enum display limits
 - return subtype mode/include/exclude
 - return preview/hint/technical depth and field limits
+- return member completion max depth
 
 ## 5) Prewarm Behavior
 

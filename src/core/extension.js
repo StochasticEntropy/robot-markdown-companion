@@ -112,8 +112,9 @@ const INTERACTIVE_IDLE_WAIT_MS = 2800;
 const BACKGROUND_TASK_MAX_WAIT_MS = 15000;
 const RUNTIME_CACHE_MAX_ENTRIES_PER_BUCKET = 1200;
 const RUNTIME_HTML_CACHE_MAX_ENTRIES = 400;
+const MEMBER_COMPLETION_MEMO_MAX_ENTRIES = 800;
 const RETURN_TYPE_CACHE_DIR = "return-type-cache";
-const RETURN_TYPE_DISK_CACHE_SCHEMA_VERSION = 1;
+const RETURN_TYPE_DISK_CACHE_SCHEMA_VERSION = 2;
 const RETURN_TYPE_DISK_WRITE_DEBOUNCE_MS = 450;
 const RETURN_TYPE_CACHE_MAX_ENTRIES_DEFAULT = 400;
 const DEBUG_PAUSED_INFO_MESSAGE =
@@ -175,7 +176,8 @@ function activate(context) {
   const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(
     parser,
     enumHintService,
-    runtimeCacheService
+    runtimeCacheService,
+    returnComputeWorker
   );
   const handleDebugStateChange = () => {
     const wasPaused = ROBOT_DEBUG_PAUSED;
@@ -213,6 +215,8 @@ function activate(context) {
       ROBOT_SELECTOR,
       typedVariableCompletionProvider,
       "=",
+      ".",
+      "}",
       "$",
       "@",
       "&",
@@ -886,6 +890,38 @@ class RobotReturnComputeWorker {
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       console.warn("[robot-companion] Return worker computation failed:", message);
+      this._snapshotGenerationByWorkspace.delete(target.workspaceKey);
+      this._snapshotFingerprintByWorkspace.delete(target.workspaceKey);
+      return undefined;
+    }
+  }
+
+  async computeReturnMemberCompletions(document, index, payload = {}) {
+    if (!this._isAvailable || !this._worker || !document || !index) {
+      return undefined;
+    }
+    const target = await this._ensureWorkspaceSnapshot(document, index);
+    if (!target) {
+      return undefined;
+    }
+
+    try {
+      const result = await this._postRequest("computeReturnMemberCompletions", {
+        workspaceKey: target.workspaceKey,
+        generation: target.generation,
+        payload
+      });
+      if (result?.cacheWrite && isReturnTypeDiskCacheEnabled()) {
+        this._recordPersistedTypeCacheWrite(
+          target.workspaceKey,
+          target.cacheFingerprint,
+          result.cacheWrite
+        );
+      }
+      return result;
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn("[robot-companion] Return member completion worker computation failed:", message);
       this._snapshotGenerationByWorkspace.delete(target.workspaceKey);
       this._snapshotFingerprintByWorkspace.delete(target.workspaceKey);
       return undefined;
@@ -1746,7 +1782,8 @@ class RobotRuntimeCacheService {
         returnHint: new Map(),
         enumPreview: new Map(),
         variableValue: new Map(),
-        typedVariableCompletion: new Map()
+        typedVariableCompletion: new Map(),
+        returnMemberCompletion: new Map()
       },
       pendingInvalidateAll: false,
       pendingInvalidateFromLine: undefined,
@@ -2004,10 +2041,16 @@ class RobotDocHoverProvider {
 }
 
 class RobotTypedVariableCompletionProvider {
-  constructor(parser, enumHintService, runtimeCacheService) {
+  constructor(parser, enumHintService, runtimeCacheService, returnComputeWorker) {
     this._parser = parser;
     this._enumHintService = enumHintService;
     this._runtimeCacheService = runtimeCacheService;
+    this._returnComputeWorker = returnComputeWorker;
+    this._memberCompletionMemo = new Map();
+  }
+
+  dispose() {
+    this._memberCompletionMemo.clear();
   }
 
   async provideCompletionItems(document, position) {
@@ -2026,7 +2069,11 @@ class RobotTypedVariableCompletionProvider {
       return undefined;
     }
 
-    if (!Number.isFinite(argumentContext.valueStart) || position.character < argumentContext.valueStart) {
+    if (
+      !Number.isFinite(argumentContext.valueStart) ||
+      !Number.isFinite(argumentContext.valueEnd) ||
+      position.character < argumentContext.valueStart
+    ) {
       return undefined;
     }
 
@@ -2034,9 +2081,28 @@ class RobotTypedVariableCompletionProvider {
     if (!owner) {
       return undefined;
     }
+    const runtimeState = this._runtimeCacheService?.ensureState(document, parsed);
+    const runtimeLookups = runtimeState?.lookups;
+
+    const memberContext = parseNamedArgumentMemberCompletionContext(argumentContext, position);
+    if (memberContext) {
+      const memberItems = await this._provideReturnMemberCompletions(
+        document,
+        parsed,
+        position,
+        owner,
+        runtimeState,
+        runtimeLookups,
+        memberContext
+      );
+      if (memberItems.length > 0) {
+        return new vscode.CompletionList(memberItems, false);
+      }
+      return undefined;
+    }
+
     const normalizedKeyword = normalizeKeywordName(argumentContext.keywordName);
     const normalizedArgument = normalizeArgumentName(argumentContext.argumentName);
-    const runtimeState = this._runtimeCacheService?.ensureState(document, parsed);
     const completionCacheKey = buildTypedVariableCompletionCacheKey(
       owner,
       position.line,
@@ -2118,6 +2184,151 @@ class RobotTypedVariableCompletionProvider {
     });
 
     return new vscode.CompletionList(items, false);
+  }
+
+  async _provideReturnMemberCompletions(
+    document,
+    parsed,
+    position,
+    owner,
+    runtimeState,
+    runtimeLookups,
+    memberContext
+  ) {
+    const normalizedRootVariable = normalizeVariableLookupToken(memberContext.rootVariableToken);
+    if (!normalizedRootVariable) {
+      return [];
+    }
+    const selectedAssignment = runtimeLookups
+      ? findLatestKeywordCallAssignmentForOwnerFromLookups(
+          runtimeLookups,
+          owner.id,
+          normalizedRootVariable,
+          position.line
+        )
+      : findLatestKeywordCallAssignmentForOwner(parsed, owner.id, normalizedRootVariable, position.line);
+    if (!selectedAssignment) {
+      return [];
+    }
+
+    const completionMaxDepth = getReturnMemberCompletionMaxDepth();
+    const normalizedPathPrefix = memberContext.pathSegments.concat([memberContext.activeSegment]).join(".");
+    const generation = Number(this._enumHintService?.getGenerationForDocument(document) || 0);
+    const memoKey = [
+      String(document.uri.toString() || ""),
+      Number(document.version) || 0,
+      generation,
+      String(owner.id || ""),
+      String(selectedAssignment.id || ""),
+      normalizedRootVariable,
+      normalizedPathPrefix,
+      completionMaxDepth
+    ].join("|");
+    const memoHit = this._memberCompletionMemo.get(memoKey);
+    if (Array.isArray(memoHit)) {
+      return this._buildReturnMemberCompletionItems(memoHit, memberContext, selectedAssignment);
+    }
+
+    const completionCacheKey = buildReturnMemberCompletionCacheKey(
+      owner,
+      position.line,
+      selectedAssignment,
+      normalizedRootVariable,
+      memberContext.pathSegments,
+      memberContext.activeSegment,
+      completionMaxDepth
+    );
+    let cachedCandidates = runtimeState
+      ? this._runtimeCacheService?.getCachedValue(runtimeState, "returnMemberCompletion", completionCacheKey, {
+          allowPending: false
+        })
+      : undefined;
+
+    if (!Array.isArray(cachedCandidates)) {
+      const computeCandidates = async () => {
+        const index = await this._enumHintService.getIndexForDocument(document);
+        if (!index) {
+          return [];
+        }
+        return await resolveReturnMemberCompletionCandidatesForAssignment(
+          document,
+          index,
+          selectedAssignment,
+          memberContext,
+          completionMaxDepth,
+          this._returnComputeWorker
+        );
+      };
+
+      if (runtimeState && this._runtimeCacheService) {
+        cachedCandidates = await this._runtimeCacheService.getOrCompute(
+          runtimeState,
+          "returnMemberCompletion",
+          completionCacheKey,
+          computeCandidates,
+          { referenceLine: Math.max(0, Number(selectedAssignment.startLine) || 0) }
+        );
+      } else {
+        cachedCandidates = await computeCandidates();
+      }
+    }
+
+    const candidates = Array.isArray(cachedCandidates) ? cachedCandidates : [];
+    this._memberCompletionMemo.set(memoKey, candidates);
+    this._trimMemberCompletionMemo();
+    return this._buildReturnMemberCompletionItems(candidates, memberContext, selectedAssignment);
+  }
+
+  _buildReturnMemberCompletionItems(candidates, memberContext, assignment) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return [];
+    }
+    const replacementRange = new vscode.Range(
+      memberContext.line,
+      memberContext.replaceStart,
+      memberContext.line,
+      memberContext.replaceEnd
+    );
+    return candidates.map((candidate) => {
+      const insertText = String(candidate?.insertText || candidate?.label || "").trim();
+      if (!insertText) {
+        return undefined;
+      }
+      const detailFromWorker =
+        String(candidate?.detail || "").trim() || `Member of ${memberContext.rootVariableToken}`;
+      const item = new vscode.CompletionItem(insertText, vscode.CompletionItemKind.Field);
+      item.textEdit = vscode.TextEdit.replace(replacementRange, insertText);
+      item.filterText = String(candidate?.filterText || insertText);
+      item.sortText = `000_${String(candidate?.sortText || insertText).toLowerCase()}`;
+      item.detail = detailFromWorker;
+      const annotation = String(candidate?.annotation || "").trim();
+      const typeDisplay = String(candidate?.typeDisplay || "").trim();
+      const lines = [];
+      if (typeDisplay) {
+        lines.push(`Type: \`${escapeMarkdownInline(typeDisplay)}\``);
+      }
+      if (annotation) {
+        lines.push(`Annotation: \`${escapeMarkdownInline(annotation)}\``);
+      }
+      if (assignment) {
+        lines.push(
+          `From keyword \`${escapeMarkdownInline(String(assignment.keywordName || ""))}\` (line ${
+            Number(assignment.startLine) + 1
+          })`
+        );
+      }
+      if (lines.length > 0) {
+        item.documentation = new vscode.MarkdownString(lines.join("\n\n"));
+      }
+      return item;
+    }).filter(Boolean);
+  }
+
+  _trimMemberCompletionMemo() {
+    while (this._memberCompletionMemo.size > MEMBER_COMPLETION_MEMO_MAX_ENTRIES) {
+      const firstKey = this._memberCompletionMemo.keys().next().value;
+      this._memberCompletionMemo.delete(firstKey);
+    }
   }
 }
 
@@ -5177,6 +5388,209 @@ async function resolveReturnHintForArgumentValueFromAssignment(
   };
 }
 
+async function resolveReturnMemberCompletionCandidatesForAssignment(
+  document,
+  index,
+  selectedAssignment,
+  memberContext,
+  completionMaxDepth,
+  returnComputeWorker
+) {
+  if (!document || !index || !selectedAssignment || !memberContext) {
+    return [];
+  }
+
+  const normalizedKeyword = normalizeKeywordName(selectedAssignment.keywordName);
+  const returnDefinition = getKeywordReturnDefinition(index, normalizedKeyword);
+  const returnAnnotation = String(
+    returnDefinition?.returnAnnotation || index.keywordReturns?.get(normalizedKeyword) || ""
+  ).trim();
+  if (!returnAnnotation) {
+    return [];
+  }
+
+  const returnResolutionContext = buildTypeResolutionContextFromReturnDefinition(index, returnDefinition);
+  const subtypePolicy = getReturnSubtypeResolutionPolicy(index);
+  const returnTypeResolution = resolveIndexedTypesFromAnnotation(returnAnnotation, index, {
+    policy: subtypePolicy,
+    resolutionContext: returnResolutionContext
+  });
+  const rootTypeNames = returnTypeResolution.typeNames;
+  if (rootTypeNames.length === 0) {
+    return [];
+  }
+
+  const depthForCache = Math.max(getReturnPreviewMaxDepth(), Math.max(1, Number(completionMaxDepth) || 1));
+  const maxFieldsPerType = getReturnMaxFieldsPerType();
+  const technicalMaxDepth = getReturnTechnicalMaxDepth();
+  const technicalMaxFieldsPerType = getReturnTechnicalMaxFieldsPerType();
+
+  if (returnComputeWorker) {
+    const workerResult = await returnComputeWorker.computeReturnMemberCompletions(document, index, {
+      variableToken: memberContext.rootVariableToken,
+      rootTypeNames,
+      rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+      typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
+      maxDepth: depthForCache,
+      maxFieldsPerType,
+      includeTechnical: false,
+      technicalMaxDepth,
+      technicalMaxFieldsPerType,
+      subtypePolicy: serializeSubtypePolicy(subtypePolicy),
+      pathSegments: memberContext.pathSegments,
+      activeSegmentPrefix: memberContext.activeSegment,
+      completionMaxDepth: Math.max(1, Number(completionMaxDepth) || 1)
+    });
+    if (Array.isArray(workerResult?.members)) {
+      return workerResult.members;
+    }
+  }
+
+  const simpleAccess = buildSimpleReturnAccessPaths(memberContext.rootVariableToken, rootTypeNames, index, {
+    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+    subtypePolicy,
+    typePreferencesByName: returnTypeResolution.typePreferencesByName,
+    resolutionContext: returnResolutionContext,
+    maxDepth: depthForCache,
+    maxFieldsPerType
+  });
+  return collectReturnMemberCompletionCandidatesFromSimpleAccess(
+    simpleAccess,
+    memberContext.rootVariableToken,
+    memberContext.pathSegments,
+    memberContext.activeSegment,
+    completionMaxDepth
+  );
+}
+
+function collectReturnMemberCompletionCandidatesFromSimpleAccess(
+  simpleAccess,
+  rootVariableToken,
+  pathSegments,
+  activeSegment,
+  completionMaxDepth
+) {
+  if (!simpleAccess || !rootVariableToken) {
+    return [];
+  }
+  const targetDepth = Math.max(1, (Array.isArray(pathSegments) ? pathSegments.length : 0) + 1);
+  const maxDepth = Math.max(1, Number(completionMaxDepth) || 1);
+  if (targetDepth > maxDepth) {
+    return [];
+  }
+  const levelEntries = Array.isArray(simpleAccess.levels) ? simpleAccess.levels[targetDepth - 1] || [] : [];
+  const normalizedPrefix = normalizeMemberCompletionToken(activeSegment).toLowerCase();
+  const normalizedPathSegments = (Array.isArray(pathSegments) ? pathSegments : [])
+    .map((segment) => normalizeMemberCompletionPathSegment(segment))
+    .filter(Boolean);
+  const candidateMap = new Map();
+  for (const accessToken of levelEntries) {
+    const accessSegments = parseRobotAccessSegmentsFromToken(accessToken, rootVariableToken);
+    if (accessSegments.length !== targetDepth) {
+      continue;
+    }
+    if (!isMemberPathPrefixMatch(accessSegments, normalizedPathSegments)) {
+      continue;
+    }
+    const candidateToken = String(accessSegments[targetDepth - 1] || "");
+    if (!candidateToken) {
+      continue;
+    }
+    const normalizedCandidate = normalizeMemberCompletionToken(candidateToken).toLowerCase();
+    if (normalizedPrefix && !normalizedCandidate.startsWith(normalizedPrefix)) {
+      continue;
+    }
+    if (candidateMap.has(normalizedCandidate)) {
+      continue;
+    }
+    candidateMap.set(normalizedCandidate, {
+      label: candidateToken,
+      insertText: candidateToken,
+      detail: "Return member",
+      annotation: "",
+      typeDisplay: ""
+    });
+  }
+  return [...candidateMap.values()].sort((left, right) =>
+    String(left.insertText || "").localeCompare(String(right.insertText || ""))
+  );
+}
+
+function parseRobotAccessSegmentsFromToken(accessToken, rootVariableToken) {
+  const rawAccess = String(accessToken || "").trim();
+  const accessMatch = rawAccess.match(/^[@$&%]\{([^}\r\n]+)\}$/);
+  if (!accessMatch) {
+    return [];
+  }
+  const rawBaseVariable = getVariableRootToken(rootVariableToken);
+  const baseMatch = String(rawBaseVariable || "").match(/^[@$&%]\{([^}\r\n]+)\}$/);
+  if (!baseMatch) {
+    return [];
+  }
+  const rootBody = String(baseMatch[1] || "").trim();
+  const fullBody = String(accessMatch[1] || "").trim();
+  if (!rootBody || !fullBody.startsWith(rootBody)) {
+    return [];
+  }
+  let suffix = fullBody.slice(rootBody.length);
+  if (suffix.startsWith("[0]")) {
+    suffix = suffix.slice(3);
+  }
+  if (suffix.startsWith(".")) {
+    suffix = suffix.slice(1);
+  }
+  if (!suffix) {
+    return [];
+  }
+  return suffix
+    .split(".")
+    .map((segment) => normalizeMemberCompletionPathSegment(segment))
+    .filter(Boolean);
+}
+
+function isMemberPathPrefixMatch(candidateSegments, typedPathSegments) {
+  if (!Array.isArray(candidateSegments) || !Array.isArray(typedPathSegments)) {
+    return false;
+  }
+  if (typedPathSegments.length > candidateSegments.length) {
+    return false;
+  }
+  for (let index = 0; index < typedPathSegments.length; index += 1) {
+    const typed = String(typedPathSegments[index] || "").trim();
+    const candidate = String(candidateSegments[index] || "").trim();
+    if (!typed || !candidate) {
+      return false;
+    }
+    const typedParsed = parseMemberPathSegmentForComparison(typed);
+    const candidateParsed = parseMemberPathSegmentForComparison(candidate);
+    if (!typedParsed || !candidateParsed) {
+      return false;
+    }
+    if (typedParsed.name !== candidateParsed.name) {
+      return false;
+    }
+    if (typedParsed.indexed && !candidateParsed.indexed) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseMemberPathSegmentForComparison(segment) {
+  const normalized = normalizeMemberCompletionPathSegment(segment);
+  if (!normalized) {
+    return undefined;
+  }
+  const match = normalized.match(/^([A-Za-z_][A-Za-z0-9_]*)(\[0\])?$/);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    name: String(match[1] || "").toLowerCase(),
+    indexed: Boolean(match[2])
+  };
+}
+
 function getKeywordReturnDefinition(index, normalizedKeyword) {
   if (!index || !normalizedKeyword) {
     return undefined;
@@ -6392,6 +6806,34 @@ function buildTypedVariableCompletionCacheKey(
   ].join("|");
 }
 
+function buildReturnMemberCompletionCacheKey(
+  owner,
+  line,
+  assignment,
+  normalizedRootVariable,
+  pathSegments,
+  activeSegment,
+  completionMaxDepth
+) {
+  return [
+    "return-member-completion",
+    String(owner?.id || ""),
+    Math.max(0, Number(line) || 0),
+    String(assignment?.id || ""),
+    String(normalizedRootVariable || ""),
+    (Array.isArray(pathSegments) ? pathSegments : []).join("."),
+    String(activeSegment || ""),
+    Math.max(1, Number(completionMaxDepth) || 1),
+    getReturnPreviewMaxDepth(),
+    getReturnMaxFieldsPerType(),
+    getReturnTechnicalMaxDepth(),
+    getReturnTechnicalMaxFieldsPerType(),
+    getReturnSubtypeResolutionMode(),
+    getReturnSubtypeIncludeContainers().join(","),
+    getReturnSubtypeExcludeContainers().join(",")
+  ].join("|");
+}
+
 function serializeTypePreferenceMapEntries(typePreferencesByName) {
   if (!(typePreferencesByName instanceof Map)) {
     return [];
@@ -6529,7 +6971,14 @@ function sanitizePersistedTypeCacheEntry(entry) {
         return {
           includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
           segments,
-          indexedSegmentPositions: [...indexedSegmentPositions].sort((left, right) => left - right)
+          indexedSegmentPositions: [...indexedSegmentPositions].sort((left, right) => left - right),
+          fieldAnnotation: String(levelTemplate?.fieldAnnotation || ""),
+          fieldTypeNames: uniqueStrings(
+            (Array.isArray(levelTemplate?.fieldTypeNames) ? levelTemplate.fieldTypeNames : [])
+              .map((value) => String(value || "").trim())
+              .filter(Boolean)
+          ),
+          fieldIsCollectionLike: Boolean(levelTemplate?.fieldIsCollectionLike)
         };
       })
       .filter(Boolean)
@@ -6567,6 +7016,7 @@ function getRuntimeCacheSettingsSignature() {
     returnMaxFieldsPerType: getReturnMaxFieldsPerType(),
     returnHintArgumentMaxDepth: getReturnHintArgumentMaxDepth(),
     returnPreviewMaxDepth: getReturnPreviewMaxDepth(),
+    returnMemberCompletionMaxDepth: getReturnMemberCompletionMaxDepth(),
     returnTechnicalMaxDepth: getReturnTechnicalMaxDepth(),
     returnTechnicalMaxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
     returnTypeDiskCacheEnabled: isReturnTypeDiskCacheEnabled(),
@@ -7197,6 +7647,100 @@ function getNamedArgumentValueContextAtPosition(document, position) {
     hoverStart: namedArgument.hoverStart,
     hoverEnd: namedArgument.hoverEnd
   };
+}
+
+function parseNamedArgumentMemberCompletionContext(argumentContext, position) {
+  if (!argumentContext || !position) {
+    return undefined;
+  }
+  const rawValue = String(argumentContext.argumentValue || "").trim();
+  if (!rawValue || !/^[@$&%]\{/.test(rawValue)) {
+    return undefined;
+  }
+
+  const variableMatch = rawValue.match(/^([@$&%])\{([^}\r\n]*)(\})?$/);
+  if (!variableMatch) {
+    return undefined;
+  }
+
+  const sigil = String(variableMatch[1] || "");
+  const body = String(variableMatch[2] || "");
+  const valueStart = Math.max(0, Number(argumentContext.valueStart) || 0);
+  const valueEnd = Math.max(valueStart, Number(argumentContext.valueEnd) || valueStart);
+  const cursorCharacter = Math.max(valueStart, Math.min(Number(position.character) || valueStart, valueEnd));
+  const cursorInValue = Math.max(0, Math.min(rawValue.length, cursorCharacter - valueStart));
+  const cursorInBody = Math.max(0, Math.min(body.length, cursorInValue - 2));
+  const bodyPrefix = body.slice(0, cursorInBody);
+  const rootMatch = bodyPrefix.match(/^([A-Za-z_][A-Za-z0-9_]*)(.*)$/);
+  if (!rootMatch) {
+    return undefined;
+  }
+
+  const rootName = String(rootMatch[1] || "").trim();
+  const remainderPrefix = String(rootMatch[2] || "");
+  if (!rootName || (!remainderPrefix.startsWith(".") && !remainderPrefix.startsWith("["))) {
+    return undefined;
+  }
+
+  let offset = 0;
+  const rootIndexMatch = remainderPrefix.match(/^\[\s*\d+\s*\]/);
+  if (rootIndexMatch) {
+    offset += rootIndexMatch[0].length;
+  }
+  if (remainderPrefix[offset] !== ".") {
+    return undefined;
+  }
+  offset += 1;
+
+  const pathPrefixRaw = remainderPrefix.slice(offset);
+  const rawSegments = pathPrefixRaw.length > 0 ? pathPrefixRaw.split(".") : [""];
+  const activeSegmentRaw = rawSegments.length > 0 ? String(rawSegments.pop() || "") : "";
+  const committedSegmentsRaw = rawSegments;
+  const pathSegments = [];
+  for (const segment of committedSegmentsRaw) {
+    const normalizedSegment = normalizeMemberCompletionPathSegment(segment);
+    if (!normalizedSegment) {
+      return undefined;
+    }
+    pathSegments.push(normalizedSegment);
+  }
+
+  const activeSegment = normalizeMemberCompletionToken(activeSegmentRaw);
+  const activeSegmentStartInPrefix = pathPrefixRaw.length - activeSegmentRaw.length;
+  const activeSegmentStartInBody = rootName.length + offset + Math.max(0, activeSegmentStartInPrefix);
+  const activeSegmentEndInBody = activeSegmentStartInBody + activeSegmentRaw.length;
+  const replaceStart = valueStart + 2 + activeSegmentStartInBody;
+  const replaceEnd = valueStart + 2 + activeSegmentEndInBody;
+
+  return {
+    line: Number(position.line),
+    rootVariableToken: `${sigil}{${rootName}}`,
+    pathSegments,
+    activeSegment,
+    replaceStart: Math.max(valueStart, replaceStart),
+    replaceEnd: Math.max(Math.max(valueStart, replaceStart), replaceEnd)
+  };
+}
+
+function normalizeMemberCompletionPathSegment(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)(\[\s*\d+\s*\])?$/);
+  if (!match) {
+    return "";
+  }
+  const name = String(match[1] || "").trim();
+  const hasIndex = Boolean(match[2]);
+  return hasIndex ? `${name}[0]` : name;
+}
+
+function normalizeMemberCompletionToken(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/\[\s*\d+\s*\]/g, "[0]");
 }
 
 function findKeywordCallHeaderLine(document, line) {
@@ -9420,6 +9964,14 @@ function getReturnPreviewMaxDepth() {
     return 2;
   }
   return Math.max(0, Math.min(12, Math.round(raw)));
+}
+
+function getReturnMemberCompletionMaxDepth() {
+  const raw = Number(getConfig().get("returnMemberCompletionMaxDepth", 2));
+  if (!Number.isFinite(raw)) {
+    return 2;
+  }
+  return Math.max(1, Math.min(12, Math.round(raw)));
 }
 
 function getReturnHintArgumentMaxDepth() {

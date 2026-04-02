@@ -33,6 +33,7 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
 - `robotCompanion.enableEnumArgumentFallback`
 - `robotCompanion.enableVariableValueHover`
 - `robotCompanion.enableTypedVariableCompletions`
+- `robotCompanion.returnMemberCompletionMaxDepth`
 - `robotCompanion.enableReturnValueHover`
 - `robotCompanion.enableReturnExplorer`
 - `robotCompanion.indexImportFolderPatterns`
@@ -68,6 +69,7 @@ Index pattern examples:
 - Caches (documentation + enum/type/return index) can be reset via the invalidate command.
 - Runtime caches for open Robot files are prewarmed by default so return/argument previews appear faster; technical return details load lazily.
 - Return resolution is type-scoped in the worker: repeated variables that resolve to the same return type reuse one cached compute result (including technical tree data).
+- `${var.}` member completions in named-argument values reuse the same worker return-type cache (memory + disk); first request may be cold, follow-up keystrokes are cache-first.
 - Worker return-type cache can be persisted per workspace (`enableReturnTypeDiskCache`) and is reused on startup when index fingerprint matches.
 - Keyword-doc view is best-effort: ambiguous matches or parse quirks show a warning banner, but content still renders.
 - Keyword-doc entries include jump links to Python keyword definitions when source locations are indexed.
