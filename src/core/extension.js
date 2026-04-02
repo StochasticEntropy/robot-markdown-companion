@@ -154,7 +154,8 @@ function activate(context) {
   updateRobotDebugPauseState();
   const parser = new RobotDocumentationService();
   const enumHintService = new RobotEnumHintService();
-  const runtimeCacheService = new RobotRuntimeCacheService(enumHintService);
+  const returnComputeWorker = new RobotReturnComputeWorker(enumHintService);
+  const runtimeCacheService = new RobotRuntimeCacheService(enumHintService, returnComputeWorker);
   const previewProvider = new RobotDocPreviewViewProvider();
   const controller = new RobotDocPreviewController(parser, previewProvider);
   const returnPreviewProvider = new RobotReturnPreviewViewProvider(runtimeCacheService);
@@ -162,7 +163,8 @@ function activate(context) {
     parser,
     enumHintService,
     returnPreviewProvider,
-    runtimeCacheService
+    runtimeCacheService,
+    returnComputeWorker
   );
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
   const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(
@@ -200,7 +202,7 @@ function activate(context) {
     vscode.languages.registerCodeLensProvider(ROBOT_SELECTOR, codeLensProvider),
     vscode.languages.registerHoverProvider(
       ROBOT_SELECTOR,
-      new RobotDocHoverProvider(parser, enumHintService, runtimeCacheService)
+      new RobotDocHoverProvider(parser, enumHintService, runtimeCacheService, returnComputeWorker)
     ),
     vscode.languages.registerCompletionItemProvider(
       ROBOT_SELECTOR,
@@ -246,6 +248,7 @@ function activate(context) {
     vscode.commands.registerCommand(CMD_INVALIDATE_CACHES, async () => {
       parser.clearAll();
       enumHintService.invalidateAll();
+      returnComputeWorker.invalidateAll();
       runtimeCacheService.invalidateAll();
       codeLensProvider.refresh();
       controller.refresh();
@@ -271,6 +274,7 @@ function activate(context) {
         event.affectsConfiguration(`${EXT_CONFIG_ROOT}.indexExcludeFolderPatterns`)
       ) {
         enumHintService.invalidateAll();
+        returnComputeWorker.invalidateAll();
       }
       runtimeCacheService.invalidateAll();
       codeLensProvider.refresh();
@@ -296,18 +300,21 @@ function activate(context) {
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (isPythonDocument(document)) {
         enumHintService.invalidateForUri(document.uri);
+        returnComputeWorker.invalidateForUri(document.uri);
         runtimeCacheService.invalidateAll();
       }
     }),
     vscode.workspace.onDidCreateFiles((event) => {
       if (event.files.some((file) => isPythonPath(file.path))) {
         enumHintService.invalidateAll();
+        returnComputeWorker.invalidateAll();
         runtimeCacheService.invalidateAll();
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
       if (event.files.some((file) => isPythonPath(file.path))) {
         enumHintService.invalidateAll();
+        returnComputeWorker.invalidateAll();
         runtimeCacheService.invalidateAll();
       }
     }),
@@ -317,6 +324,7 @@ function activate(context) {
     {
       dispose() {
         ROBOT_DEBUG_PAUSED = false;
+        returnComputeWorker.dispose();
       }
     }
   );
@@ -753,9 +761,172 @@ class RobotEnumHintService {
   }
 }
 
-class RobotRuntimeCacheService {
+class RobotReturnComputeWorker {
   constructor(enumHintService) {
     this._enumHintService = enumHintService;
+    this._worker = undefined;
+    this._requestId = 0;
+    this._pendingById = new Map();
+    this._snapshotGenerationByWorkspace = new Map();
+    this._isAvailable = false;
+
+    try {
+      const workerThreads = require("worker_threads");
+      const workerPath = path.join(__dirname, "return-worker.js");
+      this._worker = new workerThreads.Worker(workerPath);
+      this._worker.on("message", (message) => this._handleWorkerMessage(message));
+      this._worker.on("error", (error) => this._handleWorkerFailure(error));
+      this._worker.on("exit", (code) => this._handleWorkerExit(code));
+      this._isAvailable = true;
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn("[robot-companion] Return worker disabled:", message);
+    }
+  }
+
+  dispose() {
+    this.invalidateAll();
+    if (this._worker) {
+      void this._worker.terminate().catch(() => undefined);
+      this._worker = undefined;
+    }
+    this._isAvailable = false;
+  }
+
+  invalidateAll() {
+    this._snapshotGenerationByWorkspace.clear();
+    if (this._worker) {
+      void this._postRequest("clearAll", {}).catch(() => undefined);
+    }
+  }
+
+  invalidateForUri(uri) {
+    if (!uri) {
+      return;
+    }
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!workspaceFolder) {
+      return;
+    }
+    const workspaceKey = workspaceFolder.uri.toString();
+    this._snapshotGenerationByWorkspace.delete(workspaceKey);
+    if (this._worker) {
+      void this._postRequest("clearWorkspace", { workspaceKey }).catch(() => undefined);
+    }
+  }
+
+  async computeReturnPreview(document, index, payload = {}) {
+    if (!this._isAvailable || !this._worker || !document || !index) {
+      return undefined;
+    }
+    const target = await this._ensureWorkspaceSnapshot(document, index);
+    if (!target) {
+      return undefined;
+    }
+
+    try {
+      return await this._postRequest("computeReturnPreview", {
+        workspaceKey: target.workspaceKey,
+        generation: target.generation,
+        payload
+      });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn("[robot-companion] Return worker computation failed:", message);
+      this._snapshotGenerationByWorkspace.delete(target.workspaceKey);
+      return undefined;
+    }
+  }
+
+  async _ensureWorkspaceSnapshot(document, index) {
+    if (!this._isAvailable || !this._worker) {
+      return undefined;
+    }
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!workspaceFolder) {
+      return undefined;
+    }
+
+    const workspaceKey = workspaceFolder.uri.toString();
+    const generation = Number(this._enumHintService?.getGenerationForDocument(document) || 0);
+    const loadedGeneration = Number(this._snapshotGenerationByWorkspace.get(workspaceKey) || -1);
+    if (loadedGeneration === generation) {
+      return { workspaceKey, generation };
+    }
+
+    const snapshot = serializeReturnWorkerIndexSnapshot(index);
+    await this._postRequest("setWorkspaceIndex", {
+      workspaceKey,
+      generation,
+      snapshot
+    });
+    this._snapshotGenerationByWorkspace.set(workspaceKey, generation);
+    return { workspaceKey, generation };
+  }
+
+  async _postRequest(type, payload) {
+    if (!this._worker) {
+      throw new Error("worker unavailable");
+    }
+    const id = ++this._requestId;
+    const timeoutMs = 30000;
+    return await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this._pendingById.delete(id);
+        reject(new Error(`worker request timeout: ${type}`));
+      }, timeoutMs);
+
+      this._pendingById.set(id, { resolve, reject, timeout });
+      this._worker.postMessage({ id, type, payload });
+    });
+  }
+
+  _handleWorkerMessage(message) {
+    const id = Number(message?.id);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+    const pending = this._pendingById.get(id);
+    if (!pending) {
+      return;
+    }
+    this._pendingById.delete(id);
+    clearTimeout(pending.timeout);
+    if (message && message.error) {
+      pending.reject(new Error(String(message.error)));
+      return;
+    }
+    pending.resolve(message ? message.result : undefined);
+  }
+
+  _handleWorkerFailure(error) {
+    const message = error && error.message ? error.message : String(error);
+    console.warn("[robot-companion] Return worker failed:", message);
+    this._failAllPendingRequests(new Error(message));
+  }
+
+  _handleWorkerExit(code) {
+    if (code !== 0) {
+      console.warn(`[robot-companion] Return worker exited with code ${code}`);
+    }
+    this._worker = undefined;
+    this._isAvailable = false;
+    this._failAllPendingRequests(new Error("return worker exited"));
+  }
+
+  _failAllPendingRequests(error) {
+    for (const [id, pending] of this._pendingById.entries()) {
+      this._pendingById.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+  }
+}
+
+class RobotRuntimeCacheService {
+  constructor(enumHintService, returnComputeWorker) {
+    this._enumHintService = enumHintService;
+    this._returnComputeWorker = returnComputeWorker;
     this._stateByUri = new Map();
     this._prewarmQueue = [];
     this._prewarmQueuedUris = new Set();
@@ -1179,7 +1350,8 @@ class RobotRuntimeCacheService {
                 maxFieldsPerType,
                 includeTechnical: false,
                 runtimeCache: this,
-                precomputedIndex: index
+                precomputedIndex: index,
+                returnComputeWorker: this._returnComputeWorker
               }
             ),
           { referenceLine: assignment.startLine }
@@ -1398,10 +1570,11 @@ class RobotDocCodeLensProvider {
 }
 
 class RobotDocHoverProvider {
-  constructor(parser, enumHintService, runtimeCacheService) {
+  constructor(parser, enumHintService, runtimeCacheService, returnComputeWorker) {
     this._parser = parser;
     this._enumHintService = enumHintService;
     this._runtimeCacheService = runtimeCacheService;
+    this._returnComputeWorker = returnComputeWorker;
   }
 
   async provideHover(document, position) {
@@ -1471,7 +1644,10 @@ class RobotDocHoverProvider {
           position,
           this._enumHintService,
           this._runtimeCacheService,
-          { cacheOnly: true }
+          {
+            cacheOnly: true,
+            returnComputeWorker: this._returnComputeWorker
+          }
         );
         if (returnHover) {
           return returnHover;
@@ -1494,7 +1670,8 @@ class RobotDocHoverProvider {
               maxDepth: getReturnHoverMaxDepth(),
               maxFieldsPerType: getReturnMaxFieldsPerType(),
               includeTechnical: false,
-              runtimeCache: this._runtimeCacheService
+              runtimeCache: this._runtimeCacheService,
+              returnComputeWorker: this._returnComputeWorker
             }
           );
         },
@@ -2529,11 +2706,12 @@ class RobotReturnPreviewViewProvider {
 }
 
 class RobotReturnExplorerController {
-  constructor(parser, enumHintService, previewProvider, runtimeCacheService) {
+  constructor(parser, enumHintService, previewProvider, runtimeCacheService, returnComputeWorker) {
     this._parser = parser;
     this._enumHintService = enumHintService;
     this._previewProvider = previewProvider;
     this._runtimeCacheService = runtimeCacheService;
+    this._returnComputeWorker = returnComputeWorker;
     this._syncSequence = 0;
     this._suspendAutoSyncUntil = 0;
     this._debounceTimers = new Map();
@@ -2850,7 +3028,8 @@ class RobotReturnExplorerController {
         maxDepth: getReturnPreviewMaxDepth(),
         maxFieldsPerType: getReturnMaxFieldsPerType(),
         includeTechnical: false,
-        runtimeCache: this._runtimeCacheService
+        runtimeCache: this._runtimeCacheService,
+        returnComputeWorker: this._returnComputeWorker
       };
       let returnContext = undefined;
       try {
@@ -2897,7 +3076,8 @@ class RobotReturnExplorerController {
           maxDepth: getReturnPreviewMaxDepth(),
           maxFieldsPerType: getReturnMaxFieldsPerType(),
           includeTechnical: false,
-          runtimeCache: this._runtimeCacheService
+          runtimeCache: this._runtimeCacheService,
+          returnComputeWorker: this._returnComputeWorker
         }
       );
     } catch (error) {
@@ -2982,7 +3162,8 @@ class RobotReturnExplorerController {
           maxDepth: getReturnPreviewMaxDepth(),
           maxFieldsPerType: getReturnMaxFieldsPerType(),
           includeTechnical: false,
-          runtimeCache: this._runtimeCacheService
+          runtimeCache: this._runtimeCacheService,
+          returnComputeWorker: this._returnComputeWorker
         }
       );
       if (!fullContext || expectedSequence !== this._syncSequence) {
@@ -3047,7 +3228,8 @@ class RobotReturnExplorerController {
           maxDepth: getReturnPreviewMaxDepth(),
           maxFieldsPerType: getReturnMaxFieldsPerType(),
           includeTechnical: true,
-          runtimeCache: this._runtimeCacheService
+          runtimeCache: this._runtimeCacheService,
+          returnComputeWorker: this._returnComputeWorker
         }
       );
       if (!fullContext || expectedSequence !== this._syncSequence) {
@@ -4236,7 +4418,8 @@ async function createKeywordReturnHover(
     maxFieldsPerType: getReturnMaxFieldsPerType(),
     includeTechnical: false,
     runtimeCache: runtimeCacheService,
-    cacheOnly: options.cacheOnly === true
+    cacheOnly: options.cacheOnly === true,
+    returnComputeWorker: options.returnComputeWorker
   });
   if (!context) {
     return undefined;
@@ -4365,27 +4548,62 @@ async function resolveKeywordReturnPreviewFromVariableContext(
     resolutionContext: returnResolutionContext
   });
   const rootTypeNames = returnTypeResolution.typeNames;
-  const simpleAccess = buildSimpleReturnAccessPaths(variableContext.variableToken.token, rootTypeNames, index, {
-    rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
-    subtypePolicy,
-    typePreferencesByName: returnTypeResolution.typePreferencesByName,
-    resolutionContext: returnResolutionContext,
-    maxDepth: Math.max(1, Number(options.maxDepth) || 1),
-    maxFieldsPerType: Math.max(1, Number(options.maxFieldsPerType) || 1)
-  });
-  const technicalStructureLines = includeTechnical
-    ? buildReturnStructureLines(
-        rootTypeNames,
-        index,
-        {
-          maxDepth: getReturnTechnicalMaxDepth(),
-          maxFieldsPerType: getReturnTechnicalMaxFieldsPerType(),
-          typePreferencesByName: returnTypeResolution.typePreferencesByName,
-          resolutionContext: returnResolutionContext
-        },
-        "technical"
-      )
-    : [];
+  const maxDepth = Math.max(1, Number(options.maxDepth) || 1);
+  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const technicalMaxDepth = getReturnTechnicalMaxDepth();
+  const technicalMaxFieldsPerType = getReturnTechnicalMaxFieldsPerType();
+  let simpleAccess = undefined;
+  let technicalStructureLines = undefined;
+  const returnComputeWorker = options.returnComputeWorker;
+  if (returnComputeWorker && rootTypeNames.length > 0) {
+    const workerResult = await returnComputeWorker.computeReturnPreview(document, index, {
+      variableToken: variableContext.variableToken.token,
+      rootTypeNames,
+      rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+      typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
+      maxDepth,
+      maxFieldsPerType,
+      includeTechnical,
+      technicalMaxDepth,
+      technicalMaxFieldsPerType,
+      subtypePolicy: serializeSubtypePolicy(subtypePolicy)
+    });
+    if (workerResult) {
+      simpleAccess = workerResult.simpleAccess;
+      technicalStructureLines = includeTechnical
+        ? Array.isArray(workerResult.technicalStructureLines)
+          ? workerResult.technicalStructureLines
+          : []
+        : [];
+    }
+  }
+
+  if (!simpleAccess) {
+    simpleAccess = buildSimpleReturnAccessPaths(variableContext.variableToken.token, rootTypeNames, index, {
+      rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
+      subtypePolicy,
+      typePreferencesByName: returnTypeResolution.typePreferencesByName,
+      resolutionContext: returnResolutionContext,
+      maxDepth,
+      maxFieldsPerType
+    });
+  }
+
+  if (!technicalStructureLines) {
+    technicalStructureLines = includeTechnical
+      ? buildReturnStructureLines(
+          rootTypeNames,
+          index,
+          {
+            maxDepth: technicalMaxDepth,
+            maxFieldsPerType: technicalMaxFieldsPerType,
+            typePreferencesByName: returnTypeResolution.typePreferencesByName,
+            resolutionContext: returnResolutionContext
+          },
+          "technical"
+        )
+      : [];
+  }
 
   return {
     ...variableContext,
@@ -5835,6 +6053,102 @@ function buildTypedVariableCompletionCacheKey(
     String(normalizedArgument || ""),
     (expectedTypeNames || []).join(",")
   ].join("|");
+}
+
+function serializeTypePreferenceMapEntries(typePreferencesByName) {
+  if (!(typePreferencesByName instanceof Map)) {
+    return [];
+  }
+  const entries = [];
+  for (const [typeName, qualifiedNames] of typePreferencesByName.entries()) {
+    const normalizedTypeName = normalizeComparableToken(typeName);
+    if (!normalizedTypeName) {
+      continue;
+    }
+    const normalizedQualifiedNames = uniqueStrings(
+      (qualifiedNames || []).map((value) => normalizeQualifiedTypeName(value)).filter(Boolean)
+    );
+    entries.push([normalizedTypeName, normalizedQualifiedNames]);
+  }
+  return entries;
+}
+
+function serializeSubtypePolicy(policy) {
+  return {
+    mode: String(policy?.mode || "always"),
+    includeSet: [...(policy?.includeSet || [])].map((value) => String(value || "")),
+    excludeSet: [...(policy?.excludeSet || [])].map((value) => String(value || "")),
+    collectionContainers: [...(policy?.collectionContainers || [])].map((value) => String(value || ""))
+  };
+}
+
+function serializeReturnWorkerIndexSnapshot(index) {
+  return {
+    structuredTypesByName: serializeMapEntries(index?.structuredTypesByName, (candidates) =>
+      (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
+        name: String(candidate?.name || ""),
+        filePath: String(candidate?.filePath || ""),
+        modulePath: String(candidate?.modulePath || ""),
+        qualifiedName: String(candidate?.qualifiedName || ""),
+        isDataclass: Boolean(candidate?.isDataclass),
+        isIndexableWrapper: Boolean(candidate?.isIndexableWrapper),
+        baseTypeNames: uniqueStrings((candidate?.baseTypeNames || []).map((value) => String(value || ""))),
+        fields: (candidate?.fields || []).map((field) => ({
+          name: String(field?.name || ""),
+          annotation: String(field?.annotation || "")
+        }))
+      }))
+    ),
+    enumsByName: serializeMapEntries(index?.enumsByName, (candidates) =>
+      (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
+        name: String(candidate?.name || ""),
+        filePath: String(candidate?.filePath || ""),
+        qualifiedName: String(candidate?.qualifiedName || ""),
+        members: (candidate?.members || []).map((member) => ({
+          name: String(member?.name || ""),
+          valueLiteral: String(member?.valueLiteral || "")
+        }))
+      }))
+    ),
+    structuredTypesByQualifiedNameKeys: [...(index?.structuredTypesByQualifiedName?.keys?.() || [])].map((value) =>
+      String(value || "")
+    ),
+    enumsByQualifiedNameKeys: [...(index?.enumsByQualifiedName?.keys?.() || [])].map((value) =>
+      String(value || "")
+    ),
+    moduleInfoByFile: serializeMapEntries(index?.moduleInfoByFile, (moduleInfo) => ({
+      modulePath: String(moduleInfo?.modulePath || ""),
+      packagePath: String(moduleInfo?.packagePath || "")
+    })),
+    localStructuredTypeNamesByFile: serializeMapEntries(index?.localStructuredTypeNamesByFile, (names) =>
+      uniqueStrings([...(names || [])].map((value) => String(value || "")))
+    ),
+    localEnumNamesByFile: serializeMapEntries(index?.localEnumNamesByFile, (names) =>
+      uniqueStrings([...(names || [])].map((value) => String(value || "")))
+    ),
+    typeImportAliasesByFile: serializeMapEntries(index?.typeImportAliasesByFile, (aliasMap) =>
+      serializeMapEntries(aliasMap, (specs) =>
+        (Array.isArray(specs) ? specs : []).map((spec) => ({
+          modulePath: String(spec?.modulePath || ""),
+          symbolName: String(spec?.symbolName || "")
+        }))
+      )
+    ),
+    moduleImportAliasesByFile: serializeMapEntries(index?.moduleImportAliasesByFile, (aliasMap) =>
+      serializeMapEntries(aliasMap, (modulePath) => String(modulePath || ""))
+    )
+  };
+}
+
+function serializeMapEntries(source, valueMapper = (value) => value) {
+  if (!(source instanceof Map)) {
+    return [];
+  }
+  const entries = [];
+  for (const [key, value] of source.entries()) {
+    entries.push([String(key || ""), valueMapper(value)]);
+  }
+  return entries;
 }
 
 function getRuntimeCacheSettingsSignature() {

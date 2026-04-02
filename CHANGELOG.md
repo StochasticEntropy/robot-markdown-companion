@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3
+
+- Added dedicated return-compute worker thread (`src/core/return-worker.js`) for heavy return-access generation:
+  - return simple-access and technical-tree computation can now run off the extension host main thread.
+  - main-thread fallback remains in place when worker is unavailable.
+- Added worker snapshot + generation sync:
+  - workspace index snapshots are serialized once per generation and sent to the worker.
+  - worker caches are invalidated on Python/index changes and explicit cache invalidation command.
+- Integrated worker-backed compute path into hover, Return Explorer, and prewarm flows to reduce UI blocking during large return-resolution workloads.
+
 ## 0.4.2
 
 - Improved interactive responsiveness with cache-first hover/completion behavior:
