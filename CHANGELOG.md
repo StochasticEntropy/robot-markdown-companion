@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.9
+
+- Added true incremental Python indexing in `RobotEnumHintService`:
+  - on Python save/create/delete, only the affected `.py` file contribution is updated/removed.
+  - removed workspace-wide Python invalidate/rescan behavior from file events.
+- Refactored indexing into workspace-local contribution state plus in-memory derived index recompute:
+  - per-file contribution maps for Python and Robot keyword/resource sources,
+  - serialized per-workspace update queue for race-safe incremental updates.
+- `getIndexForDocument()` now waits for in-flight workspace updates and serves the latest derived in-memory index snapshot.
+- Kept conservative runtime safety invalidation for worker/runtime caches on Python changes while eliminating full filesystem rescans for index updates.
+
 ## 0.4.7
 
 - Added cache-backed `${var.}` return member completion using the existing worker return type cache (memory + disk).
