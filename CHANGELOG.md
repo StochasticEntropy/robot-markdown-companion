@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7
+
+- Added cache-backed `${var.}` return member completion using the existing worker return type cache (memory + disk).
+- Added support for member completion with closed-brace typing contexts (for example `${bp.}` with RobotCode auto-close).
+- Added setting `robotCompanion.returnMemberCompletionMaxDepth` (default `2`) to control member completion depth.
+- Added completion-side hot memoization and runtime bucket support for fast repeated keystrokes in the same context.
+
 ## 0.4.6
 
 - Changed default `robotCompanion.returnPreviewMaxDepth` from `1` to `2`.
