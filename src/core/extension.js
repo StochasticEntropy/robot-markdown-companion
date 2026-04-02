@@ -108,6 +108,7 @@ const PREWARM_IDLE_REQUIRED_MS = 350;
 const PREWARM_RESUME_CHECK_MS = 80;
 const PREWARM_DEFAULT_DELAY_MS = 25;
 const INTERACTIVE_IDLE_WAIT_MS = 2800;
+const BACKGROUND_TASK_MAX_WAIT_MS = 15000;
 const RUNTIME_CACHE_MAX_ENTRIES_PER_BUCKET = 1200;
 const RUNTIME_HTML_CACHE_MAX_ENTRIES = 400;
 const DEBUG_PAUSED_INFO_MESSAGE =
@@ -762,6 +763,8 @@ class RobotRuntimeCacheService {
     this._prewarmTimer = undefined;
     this._lastInteractiveAt = 0;
     this._prewarmAbortRequested = false;
+    this._backgroundTaskKeys = new Set();
+    this._backgroundTaskTimers = new Map();
   }
 
   dispose() {
@@ -778,6 +781,11 @@ class RobotRuntimeCacheService {
     }
     this._prewarmRunning = false;
     this._prewarmAbortRequested = false;
+    for (const timer of this._backgroundTaskTimers.values()) {
+      clearTimeout(timer);
+    }
+    this._backgroundTaskTimers.clear();
+    this._backgroundTaskKeys.clear();
   }
 
   markInteractiveActivity() {
@@ -800,6 +808,36 @@ class RobotRuntimeCacheService {
     return await task();
   }
 
+  scheduleBackgroundTask(taskKey, task, options = {}) {
+    const key = String(taskKey || "").trim();
+    if (!key || typeof task !== "function") {
+      return false;
+    }
+    if (this._backgroundTaskKeys.has(key)) {
+      return false;
+    }
+
+    this._backgroundTaskKeys.add(key);
+    const delayMs = Math.max(0, Number(options.delayMs) || 0);
+    const maxWaitMs = Math.max(
+      PREWARM_RESUME_CHECK_MS,
+      Number(options.maxWaitMs) || BACKGROUND_TASK_MAX_WAIT_MS
+    );
+    const timer = setTimeout(async () => {
+      this._backgroundTaskTimers.delete(key);
+      try {
+        await this.runWhenInteractiveIdle(task, maxWaitMs);
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        console.warn("[robot-companion] Background cache task failed:", message);
+      } finally {
+        this._backgroundTaskKeys.delete(key);
+      }
+    }, delayMs);
+    this._backgroundTaskTimers.set(key, timer);
+    return true;
+  }
+
   invalidateForUri(uri) {
     if (!uri) {
       return;
@@ -808,6 +846,14 @@ class RobotRuntimeCacheService {
     this._stateByUri.delete(key);
     this._prewarmQueuedUris.delete(key);
     this._prewarmQueue = this._prewarmQueue.filter((item) => item.uri !== key);
+    for (const [taskKey, timer] of this._backgroundTaskTimers.entries()) {
+      if (!taskKey.includes(key)) {
+        continue;
+      }
+      clearTimeout(timer);
+      this._backgroundTaskTimers.delete(taskKey);
+      this._backgroundTaskKeys.delete(taskKey);
+    }
   }
 
   invalidateOnRobotDocumentChange(event) {
@@ -1365,14 +1411,19 @@ class RobotDocHoverProvider {
     this._runtimeCacheService?.markInteractiveActivity();
 
     const parsed = this._parser.getParsed(document);
-    if (isEnumValueHoverEnabled()) {
+    const runtimeLookups = this._runtimeCacheService?.getLookupState(document, parsed);
+    const namedArgumentContext = isEnumValueHoverEnabled()
+      ? getNamedArgumentValueContextAtPosition(document, position)
+      : undefined;
+    if (namedArgumentContext) {
       try {
         const enumHover = await createEnumValueHover(
           document,
           position,
           this._enumHintService,
           parsed,
-          this._runtimeCacheService
+          this._runtimeCacheService,
+          { cacheOnly: true }
         );
         if (enumHover) {
           return enumHover;
@@ -1381,6 +1432,25 @@ class RobotDocHoverProvider {
         const message = error && error.message ? error.message : String(error);
         console.warn("[robot-companion] Enum hover failed:", message);
       }
+
+      const hoverEnumCacheKey = buildEnumPreviewContextCacheKey(namedArgumentContext, position.line, {
+        maxEnums: getEnumHoverMaxEnums(),
+        maxMembers: getEnumHoverMaxMembers()
+      });
+      this._runtimeCacheService?.scheduleBackgroundTask(
+        `hover-enum|${document.uri.toString()}|${document.version}|${hoverEnumCacheKey}`,
+        async () => {
+          const latestParsed = this._parser.getParsed(document);
+          await resolveEnumValuePreviewFromContext(document, this._enumHintService, namedArgumentContext, {
+            parsed: latestParsed,
+            referenceLine: position.line,
+            maxEnums: getEnumHoverMaxEnums(),
+            maxMembers: getEnumHoverMaxMembers(),
+            runtimeCache: this._runtimeCacheService
+          });
+        },
+        { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
+      );
     }
 
     if (isVariableValueHoverEnabled()) {
@@ -1390,14 +1460,18 @@ class RobotDocHoverProvider {
       }
     }
 
-    if (isReturnValueHoverEnabled()) {
+    const returnVariableContext = isReturnValueHoverEnabled()
+      ? getKeywordReturnVariableContextAtPosition(document, parsed, position, runtimeLookups)
+      : undefined;
+    if (returnVariableContext) {
       try {
         const returnHover = await createKeywordReturnHover(
           document,
           parsed,
           position,
           this._enumHintService,
-          this._runtimeCacheService
+          this._runtimeCacheService,
+          { cacheOnly: true }
         );
         if (returnHover) {
           return returnHover;
@@ -1406,6 +1480,26 @@ class RobotDocHoverProvider {
         const message = error && error.message ? error.message : String(error);
         console.warn("[robot-companion] Return hover failed:", message);
       }
+
+      this._runtimeCacheService?.scheduleBackgroundTask(
+        `hover-return|${document.uri.toString()}|${document.version}|${String(returnVariableContext.assignment?.id || "")}|${returnVariableContext.variableToken.token}|${getReturnHoverMaxDepth()}|${getReturnMaxFieldsPerType()}`,
+        async () => {
+          const latestParsed = this._parser.getParsed(document);
+          await resolveKeywordReturnPreview(
+            document,
+            latestParsed,
+            position,
+            this._enumHintService,
+            {
+              maxDepth: getReturnHoverMaxDepth(),
+              maxFieldsPerType: getReturnMaxFieldsPerType(),
+              includeTechnical: false,
+              runtimeCache: this._runtimeCacheService
+            }
+          );
+        },
+        { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
+      );
     }
 
     if (!isHoverPreviewEnabled()) {
@@ -1489,53 +1583,70 @@ class RobotTypedVariableCompletionProvider {
     if (!owner) {
       return undefined;
     }
-
-    const index = await this._enumHintService.getIndexForDocument(document);
-    if (!index) {
-      return undefined;
-    }
-
-    const expectedTypeNames = resolveExpectedArgumentTypeNames(
-      index,
-      normalizeKeywordName(argumentContext.keywordName),
-      normalizeArgumentName(argumentContext.argumentName)
-    );
-    if (expectedTypeNames.size === 0) {
-      return undefined;
-    }
-
+    const normalizedKeyword = normalizeKeywordName(argumentContext.keywordName);
+    const normalizedArgument = normalizeArgumentName(argumentContext.argumentName);
     const runtimeState = this._runtimeCacheService?.ensureState(document, parsed);
     const completionCacheKey = buildTypedVariableCompletionCacheKey(
       owner,
       position.line,
-      normalizeKeywordName(argumentContext.keywordName),
-      normalizeArgumentName(argumentContext.argumentName),
-      [...expectedTypeNames].sort()
+      normalizedKeyword,
+      normalizedArgument,
+      []
     );
-    const matchingVariables = runtimeState
-      ? await this._runtimeCacheService.getOrCompute(
-          runtimeState,
-          "typedVariableCompletion",
-          completionCacheKey,
-          () =>
-            collectMatchingTypedReturnVariables(
-              parsed,
-              index,
-              owner,
-              position.line,
-              expectedTypeNames,
-              runtimeState.lookups
-            ),
-          { referenceLine: position.line }
-        )
-      : collectMatchingTypedReturnVariables(
-          parsed,
-          index,
-          owner,
-          position.line,
-          expectedTypeNames
-        );
-    if (matchingVariables.length === 0) {
+    const cachedMatchingVariables = runtimeState
+      ? this._runtimeCacheService?.getCachedValue(runtimeState, "typedVariableCompletion", completionCacheKey, {
+          allowPending: false
+        })
+      : undefined;
+
+    if (!Array.isArray(cachedMatchingVariables)) {
+      this._runtimeCacheService?.scheduleBackgroundTask(
+        `typed-completion|${document.uri.toString()}|${document.version}|${completionCacheKey}`,
+        async () => {
+          const latestParsed = this._parser.getParsed(document);
+          const latestState = this._runtimeCacheService?.ensureState(document, latestParsed);
+          if (!latestState) {
+            return;
+          }
+          await this._runtimeCacheService.getOrCompute(
+            latestState,
+            "typedVariableCompletion",
+            completionCacheKey,
+            async () => {
+              const index = await this._enumHintService.getIndexForDocument(document);
+              if (!index) {
+                return [];
+              }
+              const expectedTypeNames = resolveExpectedArgumentTypeNames(
+                index,
+                normalizedKeyword,
+                normalizedArgument
+              );
+              if (expectedTypeNames.size === 0) {
+                return [];
+              }
+              const latestOwner = findOwnerForLine(latestParsed.owners, position.line);
+              if (!latestOwner) {
+                return [];
+              }
+              return collectMatchingTypedReturnVariables(
+                latestParsed,
+                index,
+                latestOwner,
+                position.line,
+                expectedTypeNames,
+                latestState.lookups
+              );
+            },
+            { referenceLine: position.line }
+          );
+        },
+        { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
+      );
+      return undefined;
+    }
+
+    if (cachedMatchingVariables.length === 0) {
       return undefined;
     }
 
@@ -1543,13 +1654,10 @@ class RobotTypedVariableCompletionProvider {
     const replaceEnd = Math.max(replaceStart, Number(argumentContext.valueEnd) || replaceStart);
     const replacementRange = new vscode.Range(position.line, replaceStart, position.line, replaceEnd);
 
-    const expectedTypeLabel = [...expectedTypeNames].slice(0, 3).join(" | ");
-    const items = matchingVariables.map((candidate) => {
+    const items = cachedMatchingVariables.map((candidate) => {
       const item = new vscode.CompletionItem(candidate.variableToken, vscode.CompletionItemKind.Variable);
       item.textEdit = vscode.TextEdit.replace(replacementRange, candidate.variableToken);
-      item.detail = expectedTypeLabel
-        ? `Type-matched variable for ${argumentContext.argumentName} (${expectedTypeLabel})`
-        : `Type-matched variable for ${argumentContext.argumentName}`;
+      item.detail = `Type-matched variable for ${argumentContext.argumentName}`;
       item.documentation = new vscode.MarkdownString(
         `From keyword \`${candidate.keywordName}\` (line ${candidate.assignmentLine + 1})\n\n` +
           `Return types: \`${candidate.typeNamesOriginal.join(" | ")}\``
@@ -2886,12 +2994,30 @@ class RobotReturnExplorerController {
       }
     };
 
+    if (this._runtimeCacheService) {
+      this._runtimeCacheService.scheduleBackgroundTask(
+        `return-preview-idle|${editor.document.uri.toString()}|${expectedSequence}|${editor.selection.active.line}|${editor.selection.active.character}`,
+        async () => {
+          try {
+            await refreshTask();
+          } catch (error) {
+            const message = error && error.message ? error.message : String(error);
+            console.warn("[robot-companion] Deferred return preview refresh failed:", message);
+            if (expectedSequence !== this._syncSequence) {
+              return;
+            }
+            this._previewProvider.update(
+              createEmptyReturnPreviewState("Failed to resolve return structure. Check Extension Host logs.")
+            );
+          }
+        },
+        { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
+      );
+      return;
+    }
+
     try {
-      if (this._runtimeCacheService) {
-        await this._runtimeCacheService.runWhenInteractiveIdle(refreshTask, INTERACTIVE_IDLE_WAIT_MS);
-      } else {
-        await refreshTask();
-      }
+      await refreshTask();
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       console.warn("[robot-companion] Deferred return preview refresh failed:", message);
@@ -2930,12 +3056,24 @@ class RobotReturnExplorerController {
       this._applyReturnPreviewContext(parsed, fullContext);
     };
 
+    if (this._runtimeCacheService) {
+      this._runtimeCacheService.scheduleBackgroundTask(
+        `return-technical-idle|${editor.document.uri.toString()}|${expectedSequence}|${editor.selection.active.line}|${editor.selection.active.character}`,
+        async () => {
+          try {
+            await refreshTask();
+          } catch (error) {
+            const message = error && error.message ? error.message : String(error);
+            console.warn("[robot-companion] Return technical refresh failed:", message);
+          }
+        },
+        { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
+      );
+      return;
+    }
+
     try {
-      if (this._runtimeCacheService) {
-        await this._runtimeCacheService.runWhenInteractiveIdle(refreshTask, INTERACTIVE_IDLE_WAIT_MS);
-      } else {
-        await refreshTask();
-      }
+      await refreshTask();
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       console.warn("[robot-companion] Return technical refresh failed:", message);
@@ -4085,11 +4223,20 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
   return new vscode.Hover(markdown, range);
 }
 
-async function createKeywordReturnHover(document, parsed, position, enumHintService, runtimeCacheService) {
+async function createKeywordReturnHover(
+  document,
+  parsed,
+  position,
+  enumHintService,
+  runtimeCacheService,
+  options = {}
+) {
   const context = await resolveKeywordReturnPreview(document, parsed, position, enumHintService, {
     maxDepth: getReturnHoverMaxDepth(),
     maxFieldsPerType: getReturnMaxFieldsPerType(),
-    runtimeCache: runtimeCacheService
+    includeTechnical: false,
+    runtimeCache: runtimeCacheService,
+    cacheOnly: options.cacheOnly === true
   });
   if (!context) {
     return undefined;
@@ -5804,12 +5951,20 @@ function stripInlineRobotComment(value) {
   return String(value || "").replace(/\s{2,}#.*$/, "");
 }
 
-async function createEnumValueHover(document, position, enumHintService, parsed, runtimeCacheService) {
+async function createEnumValueHover(
+  document,
+  position,
+  enumHintService,
+  parsed,
+  runtimeCacheService,
+  options = {}
+) {
   const context = await resolveEnumValuePreview(document, position, enumHintService, {
     parsed,
     maxEnums: getEnumHoverMaxEnums(),
     maxMembers: getEnumHoverMaxMembers(),
-    runtimeCache: runtimeCacheService
+    runtimeCache: runtimeCacheService,
+    cacheOnly: options.cacheOnly === true
   });
   if (!context) {
     return undefined;
@@ -6031,6 +6186,11 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
   const runtimeState = parsed ? runtimeCacheService?.ensureState(document, parsed) : undefined;
   if (runtimeState && runtimeCacheService && options.__skipCache !== true) {
     const cacheKey = buildEnumPreviewContextCacheKey(context, referenceLine, options);
+    if (options.cacheOnly === true) {
+      return runtimeCacheService.getCachedValue(runtimeState, "enumPreview", cacheKey, {
+        allowPending: false
+      });
+    }
     return await runtimeCacheService.getOrCompute(
       runtimeState,
       "enumPreview",

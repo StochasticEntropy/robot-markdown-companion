@@ -3,6 +3,11 @@
 This file is for development and publishing workflow notes.
 It is not included in the VSIX package because `package.json` uses a `files` whitelist that does not include this file.
 
+## Internal Technical Docs
+
+- Cache behavior and invalidation details:
+  - `README.CACHE.INTERNAL.md`
+
 ## Development / install from folder
 
 1. Open this extension folder in VS Code:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2
+
+- Improved interactive responsiveness with cache-first hover/completion behavior:
+  - enum hover and return hover now read cache first (`cacheOnly`) and avoid blocking full recomputation on cache miss.
+  - hover miss paths now schedule background warmup tasks instead of doing heavy foreground resolution.
+- Improved return hover performance:
+  - return hover resolution now always uses `includeTechnical: false` (no technical tree computation in hover path).
+- Improved typed-variable completion responsiveness:
+  - completion now serves cached candidates immediately when available.
+  - on cache miss, candidates are computed in background and reused on the next completion trigger.
+- Added a deduplicated background task scheduler in runtime cache service:
+  - interaction-aware idle scheduling for cache fill tasks
+  - per-URI timer cleanup on document runtime cache invalidation
+- Added internal caching design notes:
+  - new `README.CACHE.INTERNAL.md` documents cache layers, invalidation behavior, prewarm scope, and known gaps.
+
 ## 0.4.1
 
 - Improved responsiveness during active typing/hover by prioritizing interaction over background cache work:
