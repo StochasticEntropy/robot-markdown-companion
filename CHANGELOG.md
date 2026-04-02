@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+- Release-only pre-release refresh on `caching` branch for remote validation of the worker-thread pipeline.
+- No functional code changes compared to `0.4.3`.
+
 ## 0.4.3
 
 - Added dedicated return-compute worker thread (`src/core/return-worker.js`) for heavy return-access generation:
