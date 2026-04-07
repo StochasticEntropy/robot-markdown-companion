@@ -316,9 +316,12 @@ function activate(context) {
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (isPythonDocument(document)) {
-        void enumHintService.applyPythonDocumentSave(document).catch((error) => {
+        const updatePromise = enumHintService.applyPythonDocumentSave(document).catch((error) => {
           const message = error && error.message ? error.message : String(error);
           console.warn("[robot-companion] Incremental Python save index update failed:", message);
+        });
+        void updatePromise.finally(() => {
+          void returnController.refresh();
         });
         returnComputeWorker.invalidateTypePreviewByFileUris([document.uri]);
         runtimeCacheService.invalidateAll();
@@ -327,12 +330,17 @@ function activate(context) {
     vscode.workspace.onDidCreateFiles((event) => {
       const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
       if (pythonFiles.length > 0) {
+        const updatePromises = [];
         for (const file of pythonFiles) {
-          void enumHintService.applyPythonFileCreate(file).catch((error) => {
+          const updatePromise = enumHintService.applyPythonFileCreate(file).catch((error) => {
             const message = error && error.message ? error.message : String(error);
             console.warn("[robot-companion] Incremental Python create index update failed:", message);
           });
+          updatePromises.push(updatePromise);
         }
+        void Promise.allSettled(updatePromises).finally(() => {
+          void returnController.refresh();
+        });
         if (pythonFiles[0]?.uri) {
           returnComputeWorker.invalidateForUri(pythonFiles[0].uri);
         } else {
@@ -344,12 +352,17 @@ function activate(context) {
     vscode.workspace.onDidDeleteFiles((event) => {
       const pythonFiles = event.files.filter((file) => isPythonPath(file.path));
       if (pythonFiles.length > 0) {
+        const updatePromises = [];
         for (const file of pythonFiles) {
-          void enumHintService.applyPythonFileDelete(file).catch((error) => {
+          const updatePromise = enumHintService.applyPythonFileDelete(file).catch((error) => {
             const message = error && error.message ? error.message : String(error);
             console.warn("[robot-companion] Incremental Python delete index update failed:", message);
           });
+          updatePromises.push(updatePromise);
         }
+        void Promise.allSettled(updatePromises).finally(() => {
+          void returnController.refresh();
+        });
         if (pythonFiles[0]?.uri) {
           returnComputeWorker.invalidateForUri(pythonFiles[0].uri);
         } else {
