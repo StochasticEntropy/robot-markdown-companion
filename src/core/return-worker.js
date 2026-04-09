@@ -8,8 +8,9 @@ const SIMPLE_RETURN_IGNORED_FIELD_NAMES = new Set([
   "validierungen",
   "validation"
 ]);
+const RETURN_FIELD_NAME_STYLES = new Set(["camelcase", "snake_case", "both"]);
 const TYPE_PREVIEW_CACHE_MAX_ENTRIES_DEFAULT = 400;
-const RETURN_TYPE_CACHE_SCHEMA_VERSION = 2;
+const RETURN_TYPE_CACHE_SCHEMA_VERSION = 3;
 
 const WORKSPACE_INDEXES = new Map();
 
@@ -182,6 +183,7 @@ function hydrateReturnWorkerIndexSnapshot(snapshot) {
         qualifiedName: String(candidate?.qualifiedName || ""),
         isDataclass: Boolean(candidate?.isDataclass),
         isIndexableWrapper: Boolean(candidate?.isIndexableWrapper),
+        supportsCamelCaseAccess: Boolean(candidate?.supportsCamelCaseAccess),
         baseTypeNames: uniqueStrings((candidate?.baseTypeNames || []).map((value) => String(value || ""))),
         baseTypeRefs: (Array.isArray(candidate?.baseTypeRefs) ? candidate.baseTypeRefs : [])
           .map((baseTypeRef) => {
@@ -262,7 +264,8 @@ function computeReturnPreviewFromSnapshot(workspaceEntry, payload) {
 
   const simpleAccess = bindSimpleReturnAccessTemplate(
     String(payload?.variableToken || ""),
-    cacheResolution.cacheEntry.simpleAccessTemplate
+    cacheResolution.cacheEntry.simpleAccessTemplate,
+    payload?.fieldNameStyle
   );
   return {
     simpleAccess,
@@ -285,7 +288,8 @@ function computeReturnMemberCompletionsFromSnapshot(workspaceEntry, payload) {
     cacheResolution.cacheEntry.simpleAccessTemplate,
     pathSegments,
     activeSegmentPrefix,
-    completionMaxDepth
+    completionMaxDepth,
+    payload?.fieldNameStyle
   );
   return {
     members,
@@ -307,6 +311,7 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
   const includeTechnical = Boolean(payload?.includeTechnical);
   const technicalMaxDepth = Math.max(0, Number(payload?.technicalMaxDepth) || 0);
   const technicalMaxFieldsPerType = Math.max(1, Number(payload?.technicalMaxFieldsPerType) || 1);
+  const fieldNameStyle = normalizeReturnFieldNameStyle(payload?.fieldNameStyle);
   const typePreferencesByName = hydrateTypePreferenceMap(payload?.typePreferencesByName);
   const subtypePolicy = hydrateSubtypePolicy(payload?.subtypePolicy);
   const returnTypeCacheKey = buildReturnTypeCacheKey({
@@ -317,7 +322,8 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
     maxDepth,
     maxFieldsPerType,
     technicalMaxDepth,
-    technicalMaxFieldsPerType
+    technicalMaxFieldsPerType,
+    fieldNameStyle
   });
 
   let cacheEntry = getTypePreviewCacheEntry(workspaceEntry, returnTypeCacheKey);
@@ -389,9 +395,105 @@ function buildReturnTypeCacheKey(options) {
     maxFieldsPerType: Math.max(1, Number(options?.maxFieldsPerType) || 1),
     technicalMaxDepth: Math.max(0, Number(options?.technicalMaxDepth) || 0),
     technicalMaxFieldsPerType: Math.max(1, Number(options?.technicalMaxFieldsPerType) || 1),
+    fieldNameStyle: normalizeReturnFieldNameStyle(options?.fieldNameStyle),
     typePreferencesByName: normalizedTypePreferences,
     subtypePolicy: normalizedPolicy
   });
+}
+
+function normalizeReturnFieldNameStyle(value) {
+  const normalized = String(value || "camelcase").trim().toLowerCase();
+  if (RETURN_FIELD_NAME_STYLES.has(normalized)) {
+    return normalized;
+  }
+  return "camelcase";
+}
+
+function snakeToCamelCaseAccessSegment(segment) {
+  const parts = String(segment || "")
+    .trim()
+    .split("_")
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+  return parts
+    .map((part) => {
+      const lower = String(part || "").toLowerCase();
+      return lower ? `${lower[0].toUpperCase()}${lower.slice(1)}` : "";
+    })
+    .join("");
+}
+
+function getCamelCaseAccessAlias(segment, supportsCamelCaseAccess) {
+  if (!supportsCamelCaseAccess) {
+    return String(segment || "").trim();
+  }
+  return snakeToCamelCaseAccessSegment(segment) || String(segment || "").trim();
+}
+
+function getSegmentNameVariants(segment, supportsCamelCaseAccess, fieldNameStyle) {
+  const rawSegment = String(segment || "").trim();
+  if (!rawSegment) {
+    return [];
+  }
+  const preferredSegment = getCamelCaseAccessAlias(rawSegment, supportsCamelCaseAccess);
+  const normalizedStyle = normalizeReturnFieldNameStyle(fieldNameStyle);
+  if (normalizedStyle === "snake_case") {
+    return [rawSegment];
+  }
+  if (normalizedStyle === "both") {
+    return uniqueStrings([rawSegment, preferredSegment]);
+  }
+  return uniqueStrings([preferredSegment]);
+}
+
+function getSegmentMatchVariants(segment, supportsCamelCaseAccess) {
+  return uniqueStrings([
+    String(segment || "").trim(),
+    getCamelCaseAccessAlias(segment, supportsCamelCaseAccess)
+  ]);
+}
+
+function buildVisibleTemplateSegmentVariants(levelTemplate, fieldNameStyle) {
+  const segments = (Array.isArray(levelTemplate?.segments) ? levelTemplate.segments : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (segments.length === 0) {
+    return [];
+  }
+
+  const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+    levelTemplate?.camelCaseSegmentPositions || [],
+    segments.length
+  );
+  const preferredSegments = segments.map((segment, index) =>
+    camelCaseSegmentPositions.has(index) ? getCamelCaseAccessAlias(segment, true) : segment
+  );
+  const normalizedStyle = normalizeReturnFieldNameStyle(fieldNameStyle);
+  const candidates =
+    normalizedStyle === "snake_case"
+      ? [segments]
+      : normalizedStyle === "both"
+      ? [segments, preferredSegments]
+      : [preferredSegments];
+  const result = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const normalizedCandidate = (Array.isArray(candidate) ? candidate : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (normalizedCandidate.length !== segments.length) {
+      continue;
+    }
+    const key = normalizedCandidate.join("\u0000");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(normalizedCandidate);
+  }
+  return result;
 }
 
 function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
@@ -406,6 +508,7 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
   let currentNodes = [
     {
       segments: [],
+      camelCaseSegmentPositions: new Set(),
       indexedSegmentPositions: new Set(),
       typeNames: uniqueStrings(rootTypeNames || []),
       typePreferencesByName: rootTypePreferences
@@ -434,14 +537,23 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
           resolutionContext: fieldResolutionContext
         });
         const nestedTypeNames = nestedTypeResolution.typeNames;
+        const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+          node.camelCaseSegmentPositions,
+          segments.length
+        );
+        if (field.supportsCamelCaseAccess) {
+          camelCaseSegmentPositions.add(segments.length - 1);
+        }
         const indexedPositions = normalizeIndexedSegmentPositions(
           node.indexedSegmentPositions,
           segments.length
         );
+        const normalizedCamelCaseSegmentPositions = [...camelCaseSegmentPositions].sort((left, right) => left - right);
         const normalizedIndexedPositions = [...indexedPositions].sort((left, right) => left - right);
         const pathTemplate = {
           includeRootIndexed: rootCollectionLike,
           segments,
+          camelCaseSegmentPositions: normalizedCamelCaseSegmentPositions,
           indexedSegmentPositions: normalizedIndexedPositions,
           fieldAnnotation: String(field.annotation || "").trim(),
           fieldTypeNames: uniqueStrings(nestedTypeNames || []),
@@ -453,6 +565,12 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
         } else {
           const existing = levelPathTemplatesBySignature.get(pathSignature);
           if (existing) {
+            existing.camelCaseSegmentPositions = [
+              ...normalizeIndexedSegmentPositions(
+                [...(existing.camelCaseSegmentPositions || []), ...normalizedCamelCaseSegmentPositions],
+                segments.length
+              )
+            ].sort((left, right) => left - right);
             existing.fieldIsCollectionLike =
               Boolean(existing.fieldIsCollectionLike) || Boolean(pathTemplate.fieldIsCollectionLike);
             existing.fieldTypeNames = uniqueStrings([...(existing.fieldTypeNames || []), ...pathTemplate.fieldTypeNames]);
@@ -472,12 +590,17 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
         const segmentsKey = segments.join("\u0000");
         let nextNode = nextNodesBySegments.get(segmentsKey);
         if (!nextNode) {
+          const nextCamelCaseSegmentPositions = new Set(node.camelCaseSegmentPositions || []);
+          if (field.supportsCamelCaseAccess) {
+            nextCamelCaseSegmentPositions.add(segments.length - 1);
+          }
           const nextIndexedSegmentPositions = new Set(node.indexedSegmentPositions || []);
           if (nestedTypeResolution.hasCollectionSubtype) {
             nextIndexedSegmentPositions.add(segments.length - 1);
           }
           nextNode = {
             segments,
+            camelCaseSegmentPositions: nextCamelCaseSegmentPositions,
             indexedSegmentPositions: nextIndexedSegmentPositions,
             typeNames: new Set(),
             typePreferencesByName: new Map()
@@ -486,6 +609,9 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
           nextNodesBySegments.set(segmentsKey, nextNode);
         } else if (nestedTypeResolution.hasCollectionSubtype) {
           nextNode.indexedSegmentPositions.add(segments.length - 1);
+        }
+        if (field.supportsCamelCaseAccess) {
+          nextNode.camelCaseSegmentPositions.add(segments.length - 1);
         }
         mergeTypePreferenceMaps(nextNode.typePreferencesByName, nestedTypeResolution.typePreferencesByName);
         for (const nestedTypeName of nestedTypeNames) {
@@ -497,6 +623,7 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
     levels.push([...levelPathTemplatesBySignature.values()]);
     currentNodes = [...nextNodesBySegments.values()].map((node) => ({
       segments: node.segments,
+      camelCaseSegmentPositions: node.camelCaseSegmentPositions,
       indexedSegmentPositions: node.indexedSegmentPositions,
       typeNames: [...node.typeNames],
       typePreferencesByName: cloneTypePreferenceMap(node.typePreferencesByName)
@@ -510,24 +637,27 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
   });
 }
 
-function bindSimpleReturnAccessTemplate(variableToken, template) {
+function bindSimpleReturnAccessTemplate(variableToken, template, fieldNameStyle = "camelcase") {
   const baseVariableToken = getVariableRootToken(variableToken);
   const levels = Array.isArray(template?.levels) ? template.levels : [];
   const boundLevels = levels.map((levelTemplates) => {
     const boundPaths = [];
     for (const levelTemplate of Array.isArray(levelTemplates) ? levelTemplates : []) {
-      const accessToken = buildRobotAttributeAccessTokenWithOptions(
-        baseVariableToken,
-        levelTemplate?.segments || [],
-        {
-          includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
-          indexedSegmentPositions: new Set(levelTemplate?.indexedSegmentPositions || [])
+      const segmentVariants = buildVisibleTemplateSegmentVariants(levelTemplate, fieldNameStyle);
+      for (const segments of segmentVariants) {
+        const accessToken = buildRobotAttributeAccessTokenWithOptions(
+          baseVariableToken,
+          segments,
+          {
+            includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
+            indexedSegmentPositions: new Set(levelTemplate?.indexedSegmentPositions || [])
+          }
+        );
+        if (!accessToken) {
+          continue;
         }
-      );
-      if (!accessToken) {
-        continue;
+        boundPaths.push(accessToken);
       }
-      boundPaths.push(accessToken);
     }
     return uniqueStrings(boundPaths);
   });
@@ -543,7 +673,8 @@ function collectReturnMemberCompletionCandidatesFromTemplate(
   template,
   pathSegments,
   activeSegmentPrefix,
-  completionMaxDepth
+  completionMaxDepth,
+  fieldNameStyle = "camelcase"
 ) {
   const normalizedPathSegments = sanitizeMemberPathSegments(pathSegments || []);
   const targetDepth = normalizedPathSegments.length + 1;
@@ -564,43 +695,61 @@ function collectReturnMemberCompletionCandidatesFromTemplate(
     if (!segmentName) {
       continue;
     }
-    const insertText = levelTemplate?.fieldIsCollectionLike ? `${segmentName}[0]` : segmentName;
-    const normalizedInsertText = normalizeMemberCompletionToken(insertText).toLowerCase();
-    if (normalizedPrefix && !normalizedInsertText.startsWith(normalizedPrefix)) {
+    const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+      levelTemplate?.camelCaseSegmentPositions || [],
+      Array.isArray(levelTemplate?.segments) ? levelTemplate.segments.length : 0
+    );
+    const supportsCamelCaseAccess = camelCaseSegmentPositions.has(normalizedPathSegments.length);
+    const visibleSegmentNames = getSegmentNameVariants(segmentName, supportsCamelCaseAccess, fieldNameStyle);
+    const visibleInsertTexts = visibleSegmentNames.map((segmentVariant) =>
+      levelTemplate?.fieldIsCollectionLike ? `${segmentVariant}[0]` : segmentVariant
+    );
+    const acceptedInsertTexts = getSegmentNameVariants(segmentName, supportsCamelCaseAccess, "both").map(
+      (segmentVariant) => (levelTemplate?.fieldIsCollectionLike ? `${segmentVariant}[0]` : segmentVariant)
+    );
+    if (
+      normalizedPrefix &&
+      !acceptedInsertTexts.some((insertText) =>
+        normalizeMemberCompletionToken(insertText).toLowerCase().startsWith(normalizedPrefix)
+      )
+    ) {
       continue;
     }
-    let existing = candidateMap.get(normalizedInsertText);
-    if (!existing) {
-      existing = {
-        label: insertText,
-        insertText,
-        sortText: normalizedInsertText,
-        filterText: insertText,
-        detail: "",
-        annotation: "",
-        typeDisplay: ""
-      };
-      candidateMap.set(normalizedInsertText, existing);
-    }
     const annotation = String(levelTemplate?.fieldAnnotation || "").trim();
-    if (annotation && !existing.annotation) {
-      existing.annotation = annotation;
-    }
     const typeDisplay = uniqueStrings(
       (Array.isArray(levelTemplate?.fieldTypeNames) ? levelTemplate.fieldTypeNames : [])
         .map((value) => String(value || "").trim())
         .filter(Boolean)
     ).join(" | ");
-    if (typeDisplay && !existing.typeDisplay) {
-      existing.typeDisplay = typeDisplay;
-    }
-    if (!existing.detail) {
-      existing.detail =
-        existing.typeDisplay.length > 0
-          ? existing.typeDisplay
-          : annotation.length > 0
-          ? annotation
-          : "Return member";
+    for (const insertText of visibleInsertTexts) {
+      const normalizedInsertText = normalizeMemberCompletionToken(insertText).toLowerCase();
+      let existing = candidateMap.get(normalizedInsertText);
+      if (!existing) {
+        existing = {
+          label: insertText,
+          insertText,
+          sortText: normalizedInsertText,
+          filterText: uniqueStrings([insertText, ...acceptedInsertTexts]).join(" "),
+          detail: "",
+          annotation: "",
+          typeDisplay: ""
+        };
+        candidateMap.set(normalizedInsertText, existing);
+      }
+      if (annotation && !existing.annotation) {
+        existing.annotation = annotation;
+      }
+      if (typeDisplay && !existing.typeDisplay) {
+        existing.typeDisplay = typeDisplay;
+      }
+      if (!existing.detail) {
+        existing.detail =
+          existing.typeDisplay.length > 0
+            ? existing.typeDisplay
+            : annotation.length > 0
+            ? annotation
+            : "Return member";
+      }
     }
   }
 
@@ -616,18 +765,20 @@ function isTemplatePathPrefixMatch(levelTemplate, pathSegments) {
   }
 
   const indexedSegmentPositions = new Set(levelTemplate?.indexedSegmentPositions || []);
+  const camelCaseSegmentPositions = new Set(levelTemplate?.camelCaseSegmentPositions || []);
   for (let index = 0; index < pathSegments.length; index += 1) {
     const parsedTypedSegment = parseMemberPathSegment(pathSegments[index]);
-    const parsedTemplateSegment = parseMemberPathSegment(
-      `${templateSegments[index]}${indexedSegmentPositions.has(index) ? "[0]" : ""}`
-    );
-    if (!parsedTypedSegment || !parsedTemplateSegment) {
+    if (!parsedTypedSegment) {
       return false;
     }
-    if (parsedTypedSegment.name !== parsedTemplateSegment.name) {
+    const matchingSegmentNames = getSegmentMatchVariants(
+      templateSegments[index],
+      camelCaseSegmentPositions.has(index)
+    ).map((value) => normalizeComparableToken(value));
+    if (!matchingSegmentNames.includes(parsedTypedSegment.normalizedName)) {
       return false;
     }
-    if (parsedTypedSegment.indexed && !parsedTemplateSegment.indexed) {
+    if (parsedTypedSegment.indexed && !indexedSegmentPositions.has(index)) {
       return false;
     }
   }
@@ -684,7 +835,8 @@ function parseMemberPathSegment(segment) {
     return undefined;
   }
   return {
-    name: String(match[1] || "").toLowerCase(),
+    name: String(match[1] || ""),
+    normalizedName: normalizeComparableToken(match[1] || ""),
     indexed: Boolean(match[2])
   };
 }
@@ -867,9 +1019,14 @@ function sanitizeSimpleAccessTemplate(template) {
           levelTemplate?.indexedSegmentPositions || [],
           segments.length
         );
+        const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+          levelTemplate?.camelCaseSegmentPositions || [],
+          segments.length
+        );
         return {
           includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
           segments,
+          camelCaseSegmentPositions: [...camelCaseSegmentPositions].sort((left, right) => left - right),
           indexedSegmentPositions: [...indexedSegmentPositions].sort((left, right) => left - right),
           fieldAnnotation: String(levelTemplate?.fieldAnnotation || ""),
           fieldTypeNames: uniqueStrings(
@@ -918,98 +1075,8 @@ function hydrateSubtypePolicy(rawPolicy) {
 }
 
 function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
-  const baseVariableToken = getVariableRootToken(variableToken);
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
-  const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
-  const rootCollectionLike = Boolean(options.rootCollectionLike);
-  const subtypePolicy = options.subtypePolicy;
-  const rootTypePreferences = cloneTypePreferenceMap(options.typePreferencesByName);
-  const levels = [];
-  let currentNodes = [
-    {
-      segments: [],
-      indexedSegmentPositions: new Set(),
-      typeNames: uniqueStrings(rootTypeNames || []),
-      typePreferencesByName: rootTypePreferences
-    }
-  ];
-
-  for (let levelIndex = 1; levelIndex <= maxDepth && currentNodes.length > 0; levelIndex += 1) {
-    const levelPaths = [];
-    const nextNodesBySegments = new Map();
-
-    for (const node of currentNodes) {
-      const fields = collectDeclaredFieldsForTypes(node.typeNames, index, {
-        typePreferencesByName: node.typePreferencesByName
-      }).slice(0, maxFieldsPerType);
-      for (const field of fields) {
-        const segments = node.segments.concat(field.name);
-        const path = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
-          includeRootIndexed: rootCollectionLike,
-          indexedSegmentPositions: node.indexedSegmentPositions
-        });
-        if (path) {
-          levelPaths.push(path);
-        }
-
-        if (levelIndex >= maxDepth) {
-          continue;
-        }
-
-        const fieldResolutionContext = buildTypeResolutionContextFromSource(
-          index,
-          field.sourceFilePath,
-          field.sourceModulePath,
-          field.sourcePackagePath
-        );
-        const nestedTypeResolution = resolveIndexedTypesFromAnnotation(field.annotation, index, {
-          policy: subtypePolicy,
-          resolutionContext: fieldResolutionContext
-        });
-        const nestedTypeNames = nestedTypeResolution.typeNames;
-        if (nestedTypeNames.length === 0) {
-          continue;
-        }
-
-        const segmentsKey = segments.join("\u0000");
-        let nextNode = nextNodesBySegments.get(segmentsKey);
-        if (!nextNode) {
-          const indexedSegmentPositions = new Set(node.indexedSegmentPositions || []);
-          if (nestedTypeResolution.hasCollectionSubtype) {
-            indexedSegmentPositions.add(segments.length - 1);
-          }
-          nextNode = {
-            segments,
-            indexedSegmentPositions,
-            typeNames: new Set(),
-            typePreferencesByName: new Map()
-          };
-          mergeTypePreferenceMaps(nextNode.typePreferencesByName, node.typePreferencesByName);
-          nextNodesBySegments.set(segmentsKey, nextNode);
-        } else if (nestedTypeResolution.hasCollectionSubtype) {
-          nextNode.indexedSegmentPositions.add(segments.length - 1);
-        }
-        mergeTypePreferenceMaps(nextNode.typePreferencesByName, nestedTypeResolution.typePreferencesByName);
-        for (const nestedTypeName of nestedTypeNames) {
-          nextNode.typeNames.add(nestedTypeName);
-        }
-      }
-    }
-
-    levels.push(uniqueStrings(levelPaths));
-    currentNodes = [...nextNodesBySegments.values()].map((node) => ({
-      segments: node.segments,
-      indexedSegmentPositions: node.indexedSegmentPositions,
-      typeNames: [...node.typeNames],
-      typePreferencesByName: cloneTypePreferenceMap(node.typePreferencesByName)
-    }));
-  }
-
-  return {
-    firstLevel: levels[0] || [],
-    secondLevel: levels[1] || [],
-    levels
-  };
+  const template = buildSimpleReturnAccessTemplate(rootTypeNames, index, options);
+  return bindSimpleReturnAccessTemplate(variableToken, template, options.fieldNameStyle);
 }
 
 function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple") {
@@ -1334,6 +1401,10 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
   if (!selectedType) {
     return [];
   }
+  const fieldAccessSupportsCamelCase =
+    typeof options.fieldAccessSupportsCamelCase === "boolean"
+      ? options.fieldAccessSupportsCamelCase
+      : Boolean(selectedType.supportsCamelCaseAccess);
   const visitedKey = getStructuredTypeVisitedKey(typeName, selectedType, preferredQualifiedNames);
   if (visited.has(visitedKey) || visited.has(normalizedTypeName)) {
     return [];
@@ -1348,6 +1419,7 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
     .filter((field) => !SIMPLE_RETURN_IGNORED_FIELD_NAMES.has(normalizeComparableToken(field.name)))
     .map((field) => ({
       ...field,
+      supportsCamelCaseAccess: fieldAccessSupportsCamelCase,
       sourceFilePath,
       sourceModulePath,
       sourcePackagePath
@@ -1363,7 +1435,12 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
     if (inheritedVisitedKey === visitedKey) {
       continue;
     }
-    inheritedFields.push(...collectDeclaredFieldsForType(inheritedTypeSpecifier, index, nextVisited, options));
+    inheritedFields.push(
+      ...collectDeclaredFieldsForType(inheritedTypeSpecifier, index, nextVisited, {
+        ...options,
+        fieldAccessSupportsCamelCase
+      })
+    );
   }
 
   return dedupeFieldDescriptorsByName(fields.concat(inheritedFields));
@@ -1809,14 +1886,23 @@ function mergeTypePreferenceMaps(targetMap, sourceMap) {
 
 function dedupeFieldDescriptorsByName(fields) {
   const dedupedFields = [];
-  const seenFieldNames = new Set();
+  const seenFieldsByName = new Map();
   for (const field of fields || []) {
     const normalizedName = normalizeComparableToken(field.name);
-    if (!normalizedName || seenFieldNames.has(normalizedName)) {
+    if (!normalizedName) {
       continue;
     }
-    seenFieldNames.add(normalizedName);
-    dedupedFields.push(field);
+    const existing = seenFieldsByName.get(normalizedName);
+    if (!existing) {
+      seenFieldsByName.set(normalizedName, field);
+      dedupedFields.push(field);
+      continue;
+    }
+    existing.supportsCamelCaseAccess =
+      Boolean(existing.supportsCamelCaseAccess) || Boolean(field.supportsCamelCaseAccess);
+    if (!existing.annotation && field.annotation) {
+      existing.annotation = field.annotation;
+    }
   }
   return dedupedFields;
 }
@@ -2078,3 +2164,12 @@ function uniqueStrings(values) {
   }
   return result;
 }
+
+module.exports = {
+  __test__: {
+    normalizeReturnFieldNameStyle,
+    buildSimpleReturnAccessTemplate,
+    bindSimpleReturnAccessTemplate,
+    collectReturnMemberCompletionCandidatesFromTemplate
+  }
+};

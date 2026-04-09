@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.20
+
+- Fixed CamelCase return-member rendering for inherited fields, so CamelCase-capable wrapper responses also expose inherited members like `ProcessInstance` in the configured `camelcase` mode instead of mixing `snake_case` top-level segments with CamelCase nested members.
+
+## 0.4.19
+
+- Added configurable `robotCompanion.returnFieldNameStyle` with `camelcase` (default), `snake_case`, and `both`.
+- Return hover, Return Explorer access paths, argument-value return hints, and `${var.}` member completions now render CamelCaseBase-style aliases only for return types that support CamelCase access.
+- Member lookup still accepts both raw and CamelCase segment forms for CamelCase-capable return types, while the technical developer tree remains on raw source field names.
+
 ## 0.4.18
 
 - Fixed Python structured-type indexing for multi-line `class` declarations, so response wrapper models are discovered even when their base classes are listed across several lines.

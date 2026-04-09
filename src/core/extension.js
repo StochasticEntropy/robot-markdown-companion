@@ -94,6 +94,7 @@ const DEFAULT_INDEX_EXCLUDE_FOLDER_PATTERNS = [
 ];
 const GLOB_MAGIC_PATTERN = /[*?\[\]{}]/;
 const RETURN_SUBTYPE_RESOLUTION_MODES = new Set(["always", "never", "include", "exclude"]);
+const RETURN_FIELD_NAME_STYLES = new Set(["camelcase", "snake_case", "both"]);
 const ENUM_COMPLETION_DISPLAY_MODES = new Set(["name", "value", "both"]);
 const ROBOT_COMPANION_LOG_LEVELS = new Set(["off", "error", "warn", "info", "debug"]);
 const ROBOT_COMPANION_LOG_LEVEL_RANKS = new Map([
@@ -1214,6 +1215,8 @@ class RobotEnumHintService {
         indexableStructuredTypeNames.add(normalizeComparableToken(typeName));
       }
     }
+
+    finalizeStructuredTypeCamelCaseAccess(structuredTypesByName);
 
     state.derivedIndex = {
       enumsByName,
@@ -2941,7 +2944,8 @@ class RobotTypedVariableCompletionProvider {
       String(selectedAssignment.id || ""),
       normalizedRootVariable,
       normalizedPathPrefix,
-      completionMaxDepth
+      completionMaxDepth,
+      getReturnFieldNameStyle()
     ].join("|");
     const memoHit = this._memberCompletionMemo.get(memoKey);
     if (Array.isArray(memoHit)) {
@@ -5879,6 +5883,7 @@ async function resolveKeywordReturnPreviewFromVariableContext(
       rootTypeNames,
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
+      fieldNameStyle: getReturnFieldNameStyle(),
       maxDepth,
       maxFieldsPerType,
       includeTechnical,
@@ -6183,6 +6188,7 @@ async function resolveReturnHintForArgumentValueFromAssignment(
       rootTypeNames,
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
+      fieldNameStyle: getReturnFieldNameStyle(),
       maxDepth,
       maxFieldsPerType,
       includeTechnical: true,
@@ -6307,6 +6313,7 @@ async function resolveReturnMemberCompletionCandidatesForAssignment(
       rootTypeNames,
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
+      fieldNameStyle: getReturnFieldNameStyle(),
       maxDepth: depthForCache,
       maxFieldsPerType,
       includeTechnical: false,
@@ -6322,7 +6329,7 @@ async function resolveReturnMemberCompletionCandidatesForAssignment(
     }
   }
 
-  const simpleAccess = buildSimpleReturnAccessPaths(memberContext.rootVariableToken, rootTypeNames, index, {
+  const simpleAccessTemplate = buildSimpleReturnAccessTemplate(rootTypeNames, index, {
     rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
     subtypePolicy,
     typePreferencesByName: returnTypeResolution.typePreferencesByName,
@@ -6330,130 +6337,155 @@ async function resolveReturnMemberCompletionCandidatesForAssignment(
     maxDepth: depthForCache,
     maxFieldsPerType
   });
-  return collectReturnMemberCompletionCandidatesFromSimpleAccess(
-    simpleAccess,
-    memberContext.rootVariableToken,
+  return collectReturnMemberCompletionCandidatesFromTemplate(
+    simpleAccessTemplate,
     memberContext.pathSegments,
     memberContext.activeSegment,
-    completionMaxDepth
+    completionMaxDepth,
+    getReturnFieldNameStyle()
   );
 }
 
-function collectReturnMemberCompletionCandidatesFromSimpleAccess(
-  simpleAccess,
-  rootVariableToken,
+function collectReturnMemberCompletionCandidatesFromTemplate(
+  template,
   pathSegments,
   activeSegment,
-  completionMaxDepth
+  completionMaxDepth,
+  fieldNameStyle = "camelcase"
 ) {
-  if (!simpleAccess || !rootVariableToken) {
+  if (!template) {
     return [];
   }
-  const targetDepth = Math.max(1, (Array.isArray(pathSegments) ? pathSegments.length : 0) + 1);
+  const normalizedPathSegments = sanitizeMemberPathSegments(pathSegments || []);
+  const targetDepth = normalizedPathSegments.length + 1;
   const maxDepth = Math.max(1, Number(completionMaxDepth) || 1);
   if (targetDepth > maxDepth) {
     return [];
   }
-  const levelEntries = Array.isArray(simpleAccess.levels) ? simpleAccess.levels[targetDepth - 1] || [] : [];
+  const levels = Array.isArray(template?.levels) ? template.levels : [];
+  const levelTemplates = Array.isArray(levels[targetDepth - 1]) ? levels[targetDepth - 1] : [];
   const normalizedPrefix = normalizeMemberCompletionToken(activeSegment).toLowerCase();
-  const normalizedPathSegments = (Array.isArray(pathSegments) ? pathSegments : [])
-    .map((segment) => normalizeMemberCompletionPathSegment(segment))
-    .filter(Boolean);
   const candidateMap = new Map();
-  for (const accessToken of levelEntries) {
-    const accessSegments = parseRobotAccessSegmentsFromToken(accessToken, rootVariableToken);
-    if (accessSegments.length !== targetDepth) {
+
+  for (const levelTemplate of levelTemplates) {
+    if (!isTemplatePathPrefixMatch(levelTemplate, normalizedPathSegments)) {
       continue;
     }
-    if (!isMemberPathPrefixMatch(accessSegments, normalizedPathSegments)) {
+    const segmentName = String(levelTemplate?.segments?.[normalizedPathSegments.length] || "").trim();
+    if (!segmentName) {
       continue;
     }
-    const candidateToken = String(accessSegments[targetDepth - 1] || "");
-    if (!candidateToken) {
+    const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+      levelTemplate?.camelCaseSegmentPositions || [],
+      Array.isArray(levelTemplate?.segments) ? levelTemplate.segments.length : 0
+    );
+    const supportsCamelCaseAccess = camelCaseSegmentPositions.has(normalizedPathSegments.length);
+    const visibleSegmentNames = getSegmentNameVariants(segmentName, supportsCamelCaseAccess, fieldNameStyle);
+    const visibleInsertTexts = visibleSegmentNames.map((segmentVariant) =>
+      levelTemplate?.fieldIsCollectionLike ? `${segmentVariant}[0]` : segmentVariant
+    );
+    const acceptedInsertTexts = getSegmentNameVariants(segmentName, supportsCamelCaseAccess, "both").map(
+      (segmentVariant) => (levelTemplate?.fieldIsCollectionLike ? `${segmentVariant}[0]` : segmentVariant)
+    );
+    if (
+      normalizedPrefix &&
+      !acceptedInsertTexts.some((insertText) =>
+        normalizeMemberCompletionToken(insertText).toLowerCase().startsWith(normalizedPrefix)
+      )
+    ) {
       continue;
     }
-    const normalizedCandidate = normalizeMemberCompletionToken(candidateToken).toLowerCase();
-    if (normalizedPrefix && !normalizedCandidate.startsWith(normalizedPrefix)) {
-      continue;
+    const annotation = String(levelTemplate?.fieldAnnotation || "").trim();
+    const typeDisplay = uniqueStrings(
+      (Array.isArray(levelTemplate?.fieldTypeNames) ? levelTemplate.fieldTypeNames : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+    ).join(" | ");
+    for (const insertText of visibleInsertTexts) {
+      const normalizedInsertText = normalizeMemberCompletionToken(insertText).toLowerCase();
+      let existing = candidateMap.get(normalizedInsertText);
+      if (!existing) {
+        existing = {
+          label: insertText,
+          insertText,
+          sortText: normalizedInsertText,
+          filterText: uniqueStrings([insertText, ...acceptedInsertTexts]).join(" "),
+          detail: "",
+          annotation: "",
+          typeDisplay: ""
+        };
+        candidateMap.set(normalizedInsertText, existing);
+      }
+      if (annotation && !existing.annotation) {
+        existing.annotation = annotation;
+      }
+      if (typeDisplay && !existing.typeDisplay) {
+        existing.typeDisplay = typeDisplay;
+      }
+      if (!existing.detail) {
+        existing.detail =
+          existing.typeDisplay.length > 0
+            ? existing.typeDisplay
+            : annotation.length > 0
+            ? annotation
+            : "Return member";
+      }
     }
-    if (candidateMap.has(normalizedCandidate)) {
-      continue;
-    }
-    candidateMap.set(normalizedCandidate, {
-      label: candidateToken,
-      insertText: candidateToken,
-      detail: "Return member",
-      annotation: "",
-      typeDisplay: ""
-    });
   }
+
   return [...candidateMap.values()].sort((left, right) =>
     String(left.insertText || "").localeCompare(String(right.insertText || ""))
   );
 }
 
-function parseRobotAccessSegmentsFromToken(accessToken, rootVariableToken) {
-  const rawAccess = String(accessToken || "").trim();
-  const accessMatch = rawAccess.match(/^[@$&%]\{([^}\r\n]+)\}$/);
-  if (!accessMatch) {
-    return [];
+function isTemplatePathPrefixMatch(levelTemplate, pathSegments) {
+  const templateSegments = Array.isArray(levelTemplate?.segments) ? levelTemplate.segments : [];
+  if (pathSegments.length > templateSegments.length) {
+    return false;
   }
-  const rawBaseVariable = getVariableRootToken(rootVariableToken);
-  const baseMatch = String(rawBaseVariable || "").match(/^[@$&%]\{([^}\r\n]+)\}$/);
-  if (!baseMatch) {
-    return [];
-  }
-  const rootBody = String(baseMatch[1] || "").trim();
-  const fullBody = String(accessMatch[1] || "").trim();
-  if (!rootBody || !fullBody.startsWith(rootBody)) {
-    return [];
-  }
-  let suffix = fullBody.slice(rootBody.length);
-  if (suffix.startsWith("[0]")) {
-    suffix = suffix.slice(3);
-  }
-  if (suffix.startsWith(".")) {
-    suffix = suffix.slice(1);
-  }
-  if (!suffix) {
-    return [];
-  }
-  return suffix
-    .split(".")
-    .map((segment) => normalizeMemberCompletionPathSegment(segment))
-    .filter(Boolean);
-}
 
-function isMemberPathPrefixMatch(candidateSegments, typedPathSegments) {
-  if (!Array.isArray(candidateSegments) || !Array.isArray(typedPathSegments)) {
-    return false;
-  }
-  if (typedPathSegments.length > candidateSegments.length) {
-    return false;
-  }
-  for (let index = 0; index < typedPathSegments.length; index += 1) {
-    const typed = String(typedPathSegments[index] || "").trim();
-    const candidate = String(candidateSegments[index] || "").trim();
-    if (!typed || !candidate) {
+  const indexedSegmentPositions = new Set(levelTemplate?.indexedSegmentPositions || []);
+  const camelCaseSegmentPositions = new Set(levelTemplate?.camelCaseSegmentPositions || []);
+  for (let index = 0; index < pathSegments.length; index += 1) {
+    const parsedTypedSegment = parseMemberPathSegment(pathSegments[index]);
+    if (!parsedTypedSegment) {
       return false;
     }
-    const typedParsed = parseMemberPathSegmentForComparison(typed);
-    const candidateParsed = parseMemberPathSegmentForComparison(candidate);
-    if (!typedParsed || !candidateParsed) {
+    const matchingSegmentNames = getSegmentMatchVariants(
+      templateSegments[index],
+      camelCaseSegmentPositions.has(index)
+    ).map((value) => normalizeComparableToken(value));
+    if (!matchingSegmentNames.includes(parsedTypedSegment.normalizedName)) {
       return false;
     }
-    if (typedParsed.name !== candidateParsed.name) {
-      return false;
-    }
-    if (typedParsed.indexed && !candidateParsed.indexed) {
+    if (parsedTypedSegment.indexed && !indexedSegmentPositions.has(index)) {
       return false;
     }
   }
+
   return true;
 }
 
-function parseMemberPathSegmentForComparison(segment) {
-  const normalized = normalizeMemberCompletionPathSegment(segment);
+function sanitizeMemberPathSegments(pathSegments) {
+  return (Array.isArray(pathSegments) ? pathSegments : [])
+    .map((segment) => normalizeMemberPathSegment(segment))
+    .filter(Boolean);
+}
+
+function normalizeMemberPathSegment(segment) {
+  const normalized = normalizeMemberCompletionToken(segment);
+  if (!normalized) {
+    return "";
+  }
+  const match = normalized.match(/^([A-Za-z_][A-Za-z0-9_]*)(\[0\])?$/);
+  if (!match) {
+    return "";
+  }
+  return match[2] ? `${match[1]}[0]` : match[1];
+}
+
+function parseMemberPathSegment(segment) {
+  const normalized = normalizeMemberPathSegment(segment);
   if (!normalized) {
     return undefined;
   }
@@ -6462,7 +6494,8 @@ function parseMemberPathSegmentForComparison(segment) {
     return undefined;
   }
   return {
-    name: String(match[1] || "").toLowerCase(),
+    name: String(match[1] || ""),
+    normalizedName: normalizeComparableToken(match[1] || ""),
     indexed: Boolean(match[2])
   };
 }
@@ -7207,8 +7240,143 @@ function shouldResolveSubtypeFromContainer(normalizedContainerName, policy) {
   return policy.collectionContainers.has(normalizedContainerName);
 }
 
-function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
-  const baseVariableToken = getVariableRootToken(variableToken);
+function normalizeReturnFieldNameStyle(value) {
+  const normalized = String(value || "camelcase").trim().toLowerCase();
+  if (RETURN_FIELD_NAME_STYLES.has(normalized)) {
+    return normalized;
+  }
+  return "camelcase";
+}
+
+function snakeToCamelCaseAccessSegment(segment) {
+  const parts = String(segment || "")
+    .trim()
+    .split("_")
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+  return parts
+    .map((part) => {
+      const lower = String(part || "").toLowerCase();
+      return lower ? `${lower[0].toUpperCase()}${lower.slice(1)}` : "";
+    })
+    .join("");
+}
+
+function getCamelCaseAccessAlias(segment, supportsCamelCaseAccess) {
+  if (!supportsCamelCaseAccess) {
+    return String(segment || "").trim();
+  }
+  return snakeToCamelCaseAccessSegment(segment) || String(segment || "").trim();
+}
+
+function getSegmentNameVariants(segment, supportsCamelCaseAccess, fieldNameStyle) {
+  const rawSegment = String(segment || "").trim();
+  if (!rawSegment) {
+    return [];
+  }
+  const preferredSegment = getCamelCaseAccessAlias(rawSegment, supportsCamelCaseAccess);
+  const normalizedStyle = normalizeReturnFieldNameStyle(fieldNameStyle);
+  if (normalizedStyle === "snake_case") {
+    return [rawSegment];
+  }
+  if (normalizedStyle === "both") {
+    return uniqueStrings([rawSegment, preferredSegment]);
+  }
+  return uniqueStrings([preferredSegment]);
+}
+
+function getSegmentMatchVariants(segment, supportsCamelCaseAccess) {
+  return uniqueStrings([
+    String(segment || "").trim(),
+    getCamelCaseAccessAlias(segment, supportsCamelCaseAccess)
+  ]);
+}
+
+function buildVisibleTemplateSegmentVariants(levelTemplate, fieldNameStyle) {
+  const segments = (Array.isArray(levelTemplate?.segments) ? levelTemplate.segments : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (segments.length === 0) {
+    return [];
+  }
+
+  const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+    levelTemplate?.camelCaseSegmentPositions || [],
+    segments.length
+  );
+  const preferredSegments = segments.map((segment, index) =>
+    camelCaseSegmentPositions.has(index) ? getCamelCaseAccessAlias(segment, true) : segment
+  );
+  const normalizedStyle = normalizeReturnFieldNameStyle(fieldNameStyle);
+  const candidates =
+    normalizedStyle === "snake_case"
+      ? [segments]
+      : normalizedStyle === "both"
+      ? [segments, preferredSegments]
+      : [preferredSegments];
+  const result = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const normalizedCandidate = (Array.isArray(candidate) ? candidate : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (normalizedCandidate.length !== segments.length) {
+      continue;
+    }
+    const key = normalizedCandidate.join("\u0000");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(normalizedCandidate);
+  }
+  return result;
+}
+
+function sanitizeSimpleAccessTemplate(template) {
+  const levels = (template?.levels || []).map((levelTemplates) =>
+    (Array.isArray(levelTemplates) ? levelTemplates : [])
+      .map((levelTemplate) => {
+        const segments = (levelTemplate?.segments || [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean);
+        if (segments.length === 0) {
+          return undefined;
+        }
+        const indexedSegmentPositions = normalizeIndexedSegmentPositions(
+          levelTemplate?.indexedSegmentPositions || [],
+          segments.length
+        );
+        const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+          levelTemplate?.camelCaseSegmentPositions || [],
+          segments.length
+        );
+        return {
+          includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
+          segments,
+          camelCaseSegmentPositions: [...camelCaseSegmentPositions].sort((left, right) => left - right),
+          indexedSegmentPositions: [...indexedSegmentPositions].sort((left, right) => left - right),
+          fieldAnnotation: String(levelTemplate?.fieldAnnotation || ""),
+          fieldTypeNames: uniqueStrings(
+            (Array.isArray(levelTemplate?.fieldTypeNames) ? levelTemplate.fieldTypeNames : [])
+              .map((value) => String(value || "").trim())
+              .filter(Boolean)
+          ),
+          fieldIsCollectionLike: Boolean(levelTemplate?.fieldIsCollectionLike)
+        };
+      })
+      .filter(Boolean)
+  );
+  return {
+    levels,
+    firstLevel: levels[0] || [],
+    secondLevel: levels[1] || []
+  };
+}
+
+function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
   const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
   const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
   const rootCollectionLike = Boolean(options.rootCollectionLike);
@@ -7218,6 +7386,7 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
   let currentNodes = [
     {
       segments: [],
+      camelCaseSegmentPositions: new Set(),
       indexedSegmentPositions: new Set(),
       typeNames: uniqueStrings(rootTypeNames || []),
       typePreferencesByName: rootTypePreferences
@@ -7225,7 +7394,7 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
   ];
 
   for (let levelIndex = 1; levelIndex <= maxDepth && currentNodes.length > 0; levelIndex += 1) {
-    const levelPaths = [];
+    const levelPathTemplatesBySignature = new Map();
     const nextNodesBySegments = new Map();
 
     for (const node of currentNodes) {
@@ -7234,18 +7403,6 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
       }).slice(0, maxFieldsPerType);
       for (const field of fields) {
         const segments = node.segments.concat(field.name);
-        const path = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
-          includeRootIndexed: rootCollectionLike,
-          indexedSegmentPositions: node.indexedSegmentPositions
-        });
-        if (path) {
-          levelPaths.push(path);
-        }
-
-        if (levelIndex >= maxDepth) {
-          continue;
-        }
-
         const fieldResolutionContext = buildTypeResolutionContextFromSource(
           index,
           field.sourceFilePath,
@@ -7257,20 +7414,68 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
           resolutionContext: fieldResolutionContext
         });
         const nestedTypeNames = nestedTypeResolution.typeNames;
-        if (nestedTypeNames.length === 0) {
+        const camelCaseSegmentPositions = normalizeIndexedSegmentPositions(
+          node.camelCaseSegmentPositions,
+          segments.length
+        );
+        if (field.supportsCamelCaseAccess) {
+          camelCaseSegmentPositions.add(segments.length - 1);
+        }
+        const indexedPositions = normalizeIndexedSegmentPositions(
+          node.indexedSegmentPositions,
+          segments.length
+        );
+        const normalizedCamelCasePositions = [...camelCaseSegmentPositions].sort((left, right) => left - right);
+        const normalizedIndexedPositions = [...indexedPositions].sort((left, right) => left - right);
+        const pathTemplate = {
+          includeRootIndexed: rootCollectionLike,
+          segments,
+          camelCaseSegmentPositions: normalizedCamelCasePositions,
+          indexedSegmentPositions: normalizedIndexedPositions,
+          fieldAnnotation: String(field.annotation || "").trim(),
+          fieldTypeNames: uniqueStrings(nestedTypeNames || []),
+          fieldIsCollectionLike: Boolean(nestedTypeResolution.hasCollectionSubtype)
+        };
+        const pathSignature = `${rootCollectionLike ? "1" : "0"}|${segments.join("\u0000")}|${normalizedIndexedPositions.join(",")}`;
+        if (!levelPathTemplatesBySignature.has(pathSignature)) {
+          levelPathTemplatesBySignature.set(pathSignature, pathTemplate);
+        } else {
+          const existing = levelPathTemplatesBySignature.get(pathSignature);
+          if (existing) {
+            existing.camelCaseSegmentPositions = [
+              ...normalizeIndexedSegmentPositions(
+                [...(existing.camelCaseSegmentPositions || []), ...normalizedCamelCasePositions],
+                segments.length
+              )
+            ].sort((left, right) => left - right);
+            existing.fieldIsCollectionLike =
+              Boolean(existing.fieldIsCollectionLike) || Boolean(pathTemplate.fieldIsCollectionLike);
+            existing.fieldTypeNames = uniqueStrings([...(existing.fieldTypeNames || []), ...pathTemplate.fieldTypeNames]);
+            if (!existing.fieldAnnotation && pathTemplate.fieldAnnotation) {
+              existing.fieldAnnotation = pathTemplate.fieldAnnotation;
+            }
+          }
+        }
+
+        if (levelIndex >= maxDepth || nestedTypeNames.length === 0) {
           continue;
         }
 
         const segmentsKey = segments.join("\u0000");
         let nextNode = nextNodesBySegments.get(segmentsKey);
         if (!nextNode) {
-          const indexedSegmentPositions = new Set(node.indexedSegmentPositions || []);
+          const nextCamelCaseSegmentPositions = new Set(node.camelCaseSegmentPositions || []);
+          if (field.supportsCamelCaseAccess) {
+            nextCamelCaseSegmentPositions.add(segments.length - 1);
+          }
+          const nextIndexedSegmentPositions = new Set(node.indexedSegmentPositions || []);
           if (nestedTypeResolution.hasCollectionSubtype) {
-            indexedSegmentPositions.add(segments.length - 1);
+            nextIndexedSegmentPositions.add(segments.length - 1);
           }
           nextNode = {
             segments,
-            indexedSegmentPositions,
+            camelCaseSegmentPositions: nextCamelCaseSegmentPositions,
+            indexedSegmentPositions: nextIndexedSegmentPositions,
             typeNames: new Set(),
             typePreferencesByName: new Map()
           };
@@ -7279,6 +7484,9 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
         } else if (nestedTypeResolution.hasCollectionSubtype) {
           nextNode.indexedSegmentPositions.add(segments.length - 1);
         }
+        if (field.supportsCamelCaseAccess) {
+          nextNode.camelCaseSegmentPositions.add(segments.length - 1);
+        }
         mergeTypePreferenceMaps(nextNode.typePreferencesByName, nestedTypeResolution.typePreferencesByName);
         for (const nestedTypeName of nestedTypeNames) {
           nextNode.typeNames.add(nestedTypeName);
@@ -7286,20 +7494,57 @@ function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, optio
       }
     }
 
-    levels.push(uniqueStrings(levelPaths));
+    levels.push([...levelPathTemplatesBySignature.values()]);
     currentNodes = [...nextNodesBySegments.values()].map((node) => ({
       segments: node.segments,
+      camelCaseSegmentPositions: node.camelCaseSegmentPositions,
       indexedSegmentPositions: node.indexedSegmentPositions,
       typeNames: [...node.typeNames],
       typePreferencesByName: cloneTypePreferenceMap(node.typePreferencesByName)
     }));
   }
 
-  return {
+  return sanitizeSimpleAccessTemplate({
+    levels,
     firstLevel: levels[0] || [],
-    secondLevel: levels[1] || [],
-    levels
+    secondLevel: levels[1] || []
+  });
+}
+
+function bindSimpleReturnAccessTemplate(variableToken, template, fieldNameStyle = "camelcase") {
+  const baseVariableToken = getVariableRootToken(variableToken);
+  const levels = Array.isArray(template?.levels) ? template.levels : [];
+  const boundLevels = levels.map((levelTemplates) => {
+    const boundPaths = [];
+    for (const levelTemplate of Array.isArray(levelTemplates) ? levelTemplates : []) {
+      const segmentVariants = buildVisibleTemplateSegmentVariants(levelTemplate, fieldNameStyle);
+      for (const segments of segmentVariants) {
+        const accessToken = buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, {
+          includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
+          indexedSegmentPositions: new Set(levelTemplate?.indexedSegmentPositions || [])
+        });
+        if (accessToken) {
+          boundPaths.push(accessToken);
+        }
+      }
+    }
+    return uniqueStrings(boundPaths);
+  });
+
+  return {
+    firstLevel: boundLevels[0] || [],
+    secondLevel: boundLevels[1] || [],
+    levels: boundLevels
   };
+}
+
+function buildSimpleReturnAccessPaths(variableToken, rootTypeNames, index, options = {}) {
+  const template = buildSimpleReturnAccessTemplate(rootTypeNames, index, options);
+  return bindSimpleReturnAccessTemplate(
+    variableToken,
+    template,
+    options.fieldNameStyle || getReturnFieldNameStyle()
+  );
 }
 
 function buildRobotAttributeAccessTokenWithOptions(baseVariableToken, segments, options = {}) {
@@ -7466,6 +7711,10 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
   if (!selectedType) {
     return [];
   }
+  const fieldAccessSupportsCamelCase =
+    typeof options.fieldAccessSupportsCamelCase === "boolean"
+      ? options.fieldAccessSupportsCamelCase
+      : Boolean(selectedType.supportsCamelCaseAccess);
   const visitedKey = getStructuredTypeVisitedKey(typeName, selectedType, preferredQualifiedNames);
   if (visited.has(visitedKey) || visited.has(normalizedTypeName)) {
     return [];
@@ -7480,6 +7729,7 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
     .filter((field) => !SIMPLE_RETURN_IGNORED_FIELD_NAMES.has(normalizeComparableToken(field.name)))
     .map((field) => ({
       ...field,
+      supportsCamelCaseAccess: fieldAccessSupportsCamelCase,
       sourceFilePath,
       sourceModulePath,
       sourcePackagePath
@@ -7495,7 +7745,12 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
     if (inheritedVisitedKey === visitedKey) {
       continue;
     }
-    inheritedFields.push(...collectDeclaredFieldsForType(inheritedTypeSpecifier, index, nextVisited, options));
+    inheritedFields.push(
+      ...collectDeclaredFieldsForType(inheritedTypeSpecifier, index, nextVisited, {
+        ...options,
+        fieldAccessSupportsCamelCase
+      })
+    );
   }
 
   return dedupeFieldDescriptorsByName(fields.concat(inheritedFields));
@@ -7503,14 +7758,23 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
 
 function dedupeFieldDescriptorsByName(fields) {
   const dedupedFields = [];
-  const seenFieldNames = new Set();
+  const seenFieldsByName = new Map();
   for (const field of fields || []) {
     const normalizedName = normalizeComparableToken(field.name);
-    if (!normalizedName || seenFieldNames.has(normalizedName)) {
+    if (!normalizedName) {
       continue;
     }
-    seenFieldNames.add(normalizedName);
-    dedupedFields.push(field);
+    const existing = seenFieldsByName.get(normalizedName);
+    if (!existing) {
+      seenFieldsByName.set(normalizedName, field);
+      dedupedFields.push(field);
+      continue;
+    }
+    existing.supportsCamelCaseAccess =
+      Boolean(existing.supportsCamelCaseAccess) || Boolean(field.supportsCamelCaseAccess);
+    if (!existing.annotation && field.annotation) {
+      existing.annotation = field.annotation;
+    }
   }
   return dedupedFields;
 }
@@ -7742,6 +8006,97 @@ function choosePreferredStructuredTypeDefinition(candidates, options = {}) {
   return sorted[0];
 }
 
+function finalizeStructuredTypeCamelCaseAccess(structuredTypesByName) {
+  if (!(structuredTypesByName instanceof Map)) {
+    return;
+  }
+
+  const memo = new Map();
+
+  function computeCandidateKey(typeName, candidate) {
+    const qualifiedName = normalizeQualifiedTypeName(candidate?.qualifiedName || "");
+    if (qualifiedName) {
+      return qualifiedName;
+    }
+    return [
+      normalizeComparableToken(typeName),
+      normalizeDependencyFilePath(candidate?.filePath || ""),
+      normalizeComparableToken(candidate?.name || ""),
+      uniqueStrings((candidate?.baseTypeNames || []).map((value) => normalizeComparableToken(value))).join(",")
+    ].join("|");
+  }
+
+  function resolveBaseCandidates(baseTypeRef) {
+    const typeName = String(baseTypeRef?.typeName || "").trim();
+    if (!typeName) {
+      return [];
+    }
+    const candidates = structuredTypesByName.get(typeName) || [];
+    if (candidates.length === 0) {
+      return [];
+    }
+    const preferredQualifiedNames = uniqueStrings(
+      (Array.isArray(baseTypeRef?.preferredQualifiedNames) ? baseTypeRef.preferredQualifiedNames : [])
+        .map((value) => normalizeQualifiedTypeName(value))
+        .filter(Boolean)
+    );
+    if (preferredQualifiedNames.length === 0) {
+      return candidates;
+    }
+    const matchingCandidates = candidates.filter((candidate) =>
+      preferredQualifiedNames.includes(normalizeQualifiedTypeName(candidate?.qualifiedName || ""))
+    );
+    return matchingCandidates.length > 0 ? matchingCandidates : candidates;
+  }
+
+  function visitCandidate(typeName, candidate, visiting = new Set()) {
+    const candidateKey = computeCandidateKey(typeName, candidate);
+    if (memo.has(candidateKey)) {
+      return Boolean(memo.get(candidateKey));
+    }
+    if (visiting.has(candidateKey)) {
+      return Boolean(candidate?.supportsCamelCaseAccess);
+    }
+
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(candidateKey);
+    let supportsCamelCaseAccess = Boolean(candidate?.supportsCamelCaseAccess);
+    const baseTypeRefs =
+      Array.isArray(candidate?.baseTypeRefs) && candidate.baseTypeRefs.length > 0
+        ? candidate.baseTypeRefs
+        : uniqueStrings((candidate?.baseTypeNames || []).map((value) => String(value || "").trim())).map((baseTypeName) => ({
+            typeName: baseTypeName,
+            preferredQualifiedNames: []
+          }));
+
+    for (const baseTypeRef of baseTypeRefs) {
+      if (supportsCamelCaseAccess) {
+        break;
+      }
+      const baseTypeName = String(baseTypeRef?.typeName || "").trim();
+      if (!baseTypeName) {
+        continue;
+      }
+      for (const baseCandidate of resolveBaseCandidates(baseTypeRef)) {
+        if (visitCandidate(baseTypeName, baseCandidate, nextVisiting)) {
+          supportsCamelCaseAccess = true;
+          break;
+        }
+      }
+    }
+
+    candidate.supportsCamelCaseAccess = supportsCamelCaseAccess;
+    memo.set(candidateKey, supportsCamelCaseAccess);
+    return supportsCamelCaseAccess;
+  }
+
+  for (const [typeName, candidates] of structuredTypesByName.entries()) {
+    for (const candidate of Array.isArray(candidates) ? candidates : []) {
+      visitCandidate(typeName, candidate);
+    }
+  }
+}
+
 function choosePreferredEnumDefinition(candidates, options = {}) {
   if (!Array.isArray(candidates) || candidates.length === 0) {
     return undefined;
@@ -7884,6 +8239,7 @@ function buildReturnContextCacheKey(variableContext, maxDepth, maxFieldsPerType,
     normalizeVariableLookupToken(variableContext?.variableToken?.token || ""),
     Math.max(0, Number(maxDepth) || 0),
     Math.max(1, Number(maxFieldsPerType) || 1),
+    getReturnFieldNameStyle(),
     includeTechnical ? "full" : "simple",
     getReturnTechnicalMaxDepth(),
     getReturnTechnicalMaxFieldsPerType(),
@@ -7901,6 +8257,7 @@ function buildReturnHintContextCacheKey(ownerId, normalizedVariable, assignmentI
     String(assignmentId || ""),
     Math.max(1, Number(maxDepth) || 1),
     getReturnMaxFieldsPerType(),
+    getReturnFieldNameStyle(),
     getReturnSubtypeResolutionMode(),
     getReturnSubtypeIncludeContainers().join(","),
     getReturnSubtypeExcludeContainers().join(",")
@@ -7962,6 +8319,7 @@ function buildReturnMemberCompletionCacheKey(
     Math.max(1, Number(completionMaxDepth) || 1),
     getReturnPreviewMaxDepth(),
     getReturnMaxFieldsPerType(),
+    getReturnFieldNameStyle(),
     getReturnTechnicalMaxDepth(),
     getReturnTechnicalMaxFieldsPerType(),
     getReturnSubtypeResolutionMode(),
@@ -8007,6 +8365,7 @@ function serializeReturnWorkerIndexSnapshot(index) {
         qualifiedName: String(candidate?.qualifiedName || ""),
         isDataclass: Boolean(candidate?.isDataclass),
         isIndexableWrapper: Boolean(candidate?.isIndexableWrapper),
+        supportsCamelCaseAccess: Boolean(candidate?.supportsCamelCaseAccess),
         baseTypeNames: uniqueStrings((candidate?.baseTypeNames || []).map((value) => String(value || ""))),
         baseTypeRefs: (Array.isArray(candidate?.baseTypeRefs) ? candidate.baseTypeRefs : [])
           .map((baseTypeRef) => {
@@ -8108,40 +8467,9 @@ function sanitizePersistedTypeCacheEntry(entry) {
   if (!entry || typeof entry !== "object") {
     return undefined;
   }
-  const levels = (entry?.simpleAccessTemplate?.levels || []).map((levelTemplates) =>
-    (Array.isArray(levelTemplates) ? levelTemplates : [])
-      .map((levelTemplate) => {
-        const segments = (levelTemplate?.segments || [])
-          .map((value) => String(value || "").trim())
-          .filter(Boolean);
-        if (segments.length === 0) {
-          return undefined;
-        }
-        const indexedSegmentPositions = normalizeIndexedSegmentPositions(
-          levelTemplate?.indexedSegmentPositions || [],
-          segments.length
-        );
-        return {
-          includeRootIndexed: Boolean(levelTemplate?.includeRootIndexed),
-          segments,
-          indexedSegmentPositions: [...indexedSegmentPositions].sort((left, right) => left - right),
-          fieldAnnotation: String(levelTemplate?.fieldAnnotation || ""),
-          fieldTypeNames: uniqueStrings(
-            (Array.isArray(levelTemplate?.fieldTypeNames) ? levelTemplate.fieldTypeNames : [])
-              .map((value) => String(value || "").trim())
-              .filter(Boolean)
-          ),
-          fieldIsCollectionLike: Boolean(levelTemplate?.fieldIsCollectionLike)
-        };
-      })
-      .filter(Boolean)
-  );
+  const simpleAccessTemplate = sanitizeSimpleAccessTemplate(entry?.simpleAccessTemplate);
   return {
-    simpleAccessTemplate: {
-      levels,
-      firstLevel: levels[0] || [],
-      secondLevel: levels[1] || []
-    },
+    simpleAccessTemplate,
     technicalStructureLines: (Array.isArray(entry?.technicalStructureLines)
       ? entry.technicalStructureLines
       : []
@@ -9267,8 +9595,12 @@ function parsePythonClassHeader(lines, startIndex) {
   }
 
   const className = classMatch[1];
+  const rawBaseTypeNames = uniqueStrings(String(classMatch[2] || "").match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) || []);
+  const supportsCamelCaseAccess = rawBaseTypeNames.some(
+    (baseTypeName) => normalizeComparableToken(baseTypeName) === "camelcasebase"
+  );
   const baseTypeNames = uniqueStrings(
-    (String(classMatch[2] || "").match(/\b[A-Za-z_][A-Za-z0-9_]*\b/g) || []).filter(
+    rawBaseTypeNames.filter(
       (baseTypeName) =>
         !PYTHON_IGNORED_TYPE_TOKENS.has(String(baseTypeName).toLowerCase()) &&
         normalizeComparableToken(baseTypeName) !== normalizeComparableToken(className)
@@ -9279,6 +9611,7 @@ function parsePythonClassHeader(lines, startIndex) {
     classIndent,
     className,
     baseTypeNames,
+    supportsCamelCaseAccess,
     headerEndIndex
   };
 }
@@ -9304,7 +9637,7 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
       continue;
     }
 
-    const { classIndent, className, baseTypeNames, headerEndIndex } = classHeader;
+    const { classIndent, className, baseTypeNames, supportsCamelCaseAccess, headerEndIndex } = classHeader;
     const isDataclass = pendingDecorators.some((decorator) => /^@dataclass\b/.test(decorator));
     pendingDecorators = [];
 
@@ -9400,6 +9733,7 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
       filePath,
       isDataclass,
       isIndexableWrapper: hasIndexableMethod,
+      supportsCamelCaseAccess: Boolean(supportsCamelCaseAccess),
       baseTypeNames,
       fields: uniqueFields
     });
@@ -11224,6 +11558,16 @@ function getEnumHoverMaxMembers() {
   return Math.max(5, Math.min(500, Math.round(raw)));
 }
 
+function getReturnFieldNameStyle() {
+  const rawStyle = String(getConfig().get("returnFieldNameStyle", "camelcase") || "camelcase")
+    .trim()
+    .toLowerCase();
+  if (RETURN_FIELD_NAME_STYLES.has(rawStyle)) {
+    return rawStyle;
+  }
+  return "camelcase";
+}
+
 function getReturnSubtypeResolutionMode() {
   const rawMode = String(getConfig().get("returnSubtypeResolutionMode", "always") || "always")
     .trim()
@@ -11363,5 +11707,9 @@ function escapeHtml(value) {
 
 module.exports = {
   activate,
-  deactivate
+  deactivate,
+  __test__: {
+    parseStructuredTypesFromPythonSource,
+    finalizeStructuredTypeCamelCaseAccess
+  }
 };

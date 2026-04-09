@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Robot Companion for Robot Framework: return/value/enum intelligence with synchronized documentation preview.",
-  "version": "0.4.18",
+  "version": "0.4.20",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -49,7 +49,8 @@
     "publish": "npx @vscode/vsce publish",
     "publish:patch": "npx @vscode/vsce publish patch",
     "publish:minor": "npx @vscode/vsce publish minor",
-    "publish:major": "npx @vscode/vsce publish major"
+    "publish:major": "npx @vscode/vsce publish major",
+    "test:return-field-name-style": "node tests/return-field-name-style.test.js"
   },
   "activationEvents": [
     "onLanguage:robotframework",
@@ -178,6 +179,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show `${var.}` member completions for resolved return variables in named argument value positions."
+        },
+        "robotCompanion.returnFieldNameStyle": {
+          "type": "string",
+          "enum": [
+            "camelcase",
+            "snake_case",
+            "both"
+          ],
+          "default": "camelcase",
+          "description": "Controls whether return hover/explorer/member access uses CamelCaseBase-style aliases (`StatusCode`), raw `snake_case`, or both when the resolved Python class supports CamelCase access."
         },
         "robotCompanion.returnMemberCompletionMaxDepth": {
           "type": "number",
