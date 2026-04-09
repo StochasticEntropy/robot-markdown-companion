@@ -447,16 +447,23 @@ function snakeToCamelCaseAccessSegment(segment) {
     return "";
   }
   if (!rawSegment.includes("_")) {
-    return `${rawSegment[0].toUpperCase()}${rawSegment.slice(1)}`;
+    return `${rawSegment[0].toLowerCase()}${rawSegment.slice(1)}`;
   }
-  return rawSegment
+  const parts = rawSegment
     .split("_")
     .filter(Boolean)
     .map((part) => {
       const trimmedPart = String(part || "").trim();
-      return trimmedPart ? `${trimmedPart[0].toUpperCase()}${trimmedPart.slice(1)}` : "";
+      return trimmedPart || "";
     })
-    .join("");
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "";
+  }
+  return `${parts[0][0].toLowerCase()}${parts[0].slice(1)}${parts
+    .slice(1)
+    .map((part) => `${part[0].toUpperCase()}${part.slice(1)}`)
+    .join("")}`;
 }
 
 function getCamelCaseAccessAlias(segment, supportsCamelCaseAccess) {

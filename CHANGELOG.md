@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.24
+
+- Changed `robotCompanion.returnFieldNameStyle=camelcase` to render true lower camelCase aliases such as `statusCode`, `processInstanceId`, and `businessKey` instead of PascalCase-like names.
+- Kept explicit aliases such as `businesspartnerId` unchanged, so already-camelCase property names continue to appear exactly as defined by the Python model.
+
 ## 0.4.23
 
 - Fixed return-member/property deduping so explicit Python property aliases remain visible instead of collapsing into the same normalized name.

@@ -340,29 +340,29 @@ function runReturnFieldNameStyleTests() {
     maxFieldsPerType: 10
   });
   const camelOnly = workerTestApi.bindSimpleReturnAccessTemplate("${resp}", camelTemplate, "camelcase");
-  assert(camelOnly.firstLevel.includes("${resp.StatusCode}"));
-  assert(camelOnly.firstLevel.includes("${resp.PlainChild}"));
+  assert(camelOnly.firstLevel.includes("${resp.statusCode}"));
+  assert(camelOnly.firstLevel.includes("${resp.plainChild}"));
   assert(!camelOnly.firstLevel.includes("${resp.status_code}"));
-  assert(camelOnly.secondLevel.includes("${resp.StatusCode.BusinessKey}"));
-  assert(camelOnly.secondLevel.includes("${resp.PlainChild.raw_field}"));
-  assert(!camelOnly.secondLevel.includes("${resp.PlainChild.RawField}"));
+  assert(camelOnly.secondLevel.includes("${resp.statusCode.businessKey}"));
+  assert(camelOnly.secondLevel.includes("${resp.plainChild.raw_field}"));
+  assert(!camelOnly.secondLevel.includes("${resp.plainChild.RawField}"));
 
   const snakeOnly = workerTestApi.bindSimpleReturnAccessTemplate("${resp}", camelTemplate, "snake_case");
   assert(snakeOnly.firstLevel.includes("${resp.status_code}"));
   assert(snakeOnly.firstLevel.includes("${resp.plain_child}"));
   assert(snakeOnly.secondLevel.includes("${resp.status_code.business_key}"));
   assert(snakeOnly.secondLevel.includes("${resp.plain_child.raw_field}"));
-  assert(!snakeOnly.secondLevel.includes("${resp.PlainChild.raw_field}"));
+  assert(!snakeOnly.secondLevel.includes("${resp.plainChild.raw_field}"));
 
   const both = workerTestApi.bindSimpleReturnAccessTemplate("${resp}", camelTemplate, "both");
-  assert(both.firstLevel.includes("${resp.StatusCode}"));
+  assert(both.firstLevel.includes("${resp.statusCode}"));
   assert(both.firstLevel.includes("${resp.status_code}"));
-  assert(both.secondLevel.includes("${resp.StatusCode.BusinessKey}"));
+  assert(both.secondLevel.includes("${resp.statusCode.businessKey}"));
   assert(both.secondLevel.includes("${resp.status_code.business_key}"));
-  assert(both.secondLevel.includes("${resp.PlainChild.raw_field}"));
+  assert(both.secondLevel.includes("${resp.plainChild.raw_field}"));
   assert(both.secondLevel.includes("${resp.plain_child.raw_field}"));
-  assert(!both.secondLevel.includes("${resp.StatusCode.business_key}"));
-  assert(!both.secondLevel.includes("${resp.status_code.BusinessKey}"));
+  assert(!both.secondLevel.includes("${resp.statusCode.business_key}"));
+  assert(!both.secondLevel.includes("${resp.status_code.businessKey}"));
 
   const plainTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["PlainResponse"], index, {
     maxDepth: 1,
@@ -380,9 +380,9 @@ function runReturnFieldNameStyleTests() {
     inheritedCamelTemplate,
     "camelcase"
   );
-  assert(inheritedCamelOnly.firstLevel.includes("${wrapped.ProcessInstance}"));
+  assert(inheritedCamelOnly.firstLevel.includes("${wrapped.processInstance}"));
   assert(!inheritedCamelOnly.firstLevel.includes("${wrapped.process_instance}"));
-  assert(inheritedCamelOnly.secondLevel.includes("${wrapped.ProcessInstance.BusinessKey}"));
+  assert(inheritedCamelOnly.secondLevel.includes("${wrapped.processInstance.businessKey}"));
 }
 
 function runPropertyInclusionTests() {
@@ -411,7 +411,7 @@ function runPropertyInclusionTests() {
     withPropertiesTemplate,
     "camelcase"
   );
-  assert.deepStrictEqual(camelOnly.firstLevel, ["${payload.StatusCode}", "${payload.BusinessKey}"]);
+  assert.deepStrictEqual(camelOnly.firstLevel, ["${payload.statusCode}", "${payload.businessKey}"]);
 
   const snakeOnly = workerTestApi.bindSimpleReturnAccessTemplate(
     "${payload}",
@@ -432,7 +432,7 @@ function runPropertyInclusionTests() {
     withoutPropertiesTemplate,
     "camelcase"
   );
-  assert.deepStrictEqual(withoutProperties.firstLevel, ["${payload.StatusCode}"]);
+  assert.deepStrictEqual(withoutProperties.firstLevel, ["${payload.statusCode}"]);
 
   const technicalWithProperties = workerTestApi.buildReturnStructureLines(
     ["PropertyPayload"],
@@ -551,7 +551,7 @@ function runCompletionMatchingTests() {
     2,
     "camelcase"
   );
-  assert(camelPrefix.some((candidate) => candidate.insertText === "StatusCode"));
+  assert(camelPrefix.some((candidate) => candidate.insertText === "statusCode"));
   assert(!camelPrefix.some((candidate) => candidate.insertText === "status_code"));
 
   const rawPrefixStillMatchesCamel = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
@@ -563,7 +563,7 @@ function runCompletionMatchingTests() {
   );
   assert.deepStrictEqual(
     rawPrefixStillMatchesCamel.map((candidate) => candidate.insertText),
-    ["StatusCode"]
+    ["statusCode"]
   );
 
   const bothPrefix = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
@@ -573,19 +573,19 @@ function runCompletionMatchingTests() {
     2,
     "both"
   );
-  assert(bothPrefix.some((candidate) => candidate.insertText === "StatusCode"));
+  assert(bothPrefix.some((candidate) => candidate.insertText === "statusCode"));
   assert(bothPrefix.some((candidate) => candidate.insertText === "status_code"));
 
   const nestedFromCamelPath = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
     template,
-    ["StatusCode"],
+    ["statusCode"],
     "Bus",
     2,
     "camelcase"
   );
   assert.deepStrictEqual(
     nestedFromCamelPath.map((candidate) => candidate.insertText),
-    ["BusinessKey"]
+    ["businessKey"]
   );
 
   const nestedFromRawPath = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
@@ -597,7 +597,7 @@ function runCompletionMatchingTests() {
   );
   assert.deepStrictEqual(
     nestedFromRawPath.map((candidate) => candidate.insertText),
-    ["BusinessKey"]
+    ["businessKey"]
   );
 
   const propertyIndex = createIndex([
@@ -629,7 +629,7 @@ function runCompletionMatchingTests() {
   );
   assert.deepStrictEqual(
     propertyPrefix.map((candidate) => candidate.insertText),
-    ["BusinessKey"]
+    ["businessKey"]
   );
 
   const propertyPrefixSnake = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
