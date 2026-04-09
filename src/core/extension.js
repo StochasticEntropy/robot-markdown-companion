@@ -5081,45 +5081,16 @@ function buildEnumPreviewMarkdown(context) {
     );
     for (let levelIndex = 0; levelIndex < returnHintAccessLevels.length; levelIndex += 1) {
       const levelPaths = returnHintAccessLevels[levelIndex];
-      const shownPaths = levelPaths.slice(0, 12);
-      const remainingPaths = levelPaths.slice(shownPaths.length);
       const accessDepthLabel = formatAccessDepthLabel(levelIndex + 1);
-      const accessDepthLabelLower = accessDepthLabel.toLowerCase();
       lines.push("");
       lines.push(`**${accessDepthLabel}:**`);
-      if (remainingPaths.length > 0) {
-        lines.push(
-          buildInlineExpandableCodeBlockHtml(
-            shownPaths,
-            remainingPaths,
-            `Show remaining ${remainingPaths.length} ${accessDepthLabelLower} paths`
-          )
-        );
-        lines.push("");
-        lines.push(
-          `_Showing first ${shownPaths.length} of ${levelPaths.length} ${accessDepthLabelLower} paths (expand to view all)._`
-        );
-      } else {
-        lines.push("```robotframework");
-        lines.push(shownPaths.join("\n"));
-        lines.push("```");
-      }
+      lines.push("```robotframework");
+      lines.push(levelPaths.join("\n"));
+      lines.push("```");
     }
   }
 
   return lines.join("\n");
-}
-
-function buildInlineExpandableCodeBlockHtml(shownPaths, remainingPaths, summaryLabel) {
-  const safeShown = escapeHtml((shownPaths || []).join("\n"));
-  const safeRemaining = escapeHtml((remainingPaths || []).join("\n"));
-  const tailPrefix = safeShown.length > 0 && safeRemaining.length > 0 ? "\n" : "";
-  return [
-    '<div class="inline-expand-code-block">',
-    `<details><summary>${escapeHtml(summaryLabel)}</summary></details>`,
-    `<pre><code class="language-robotframework">${safeShown}<span class="inline-expand-tail">${tailPrefix}${safeRemaining}</span></code></pre>`,
-    "</div>"
-  ].join("\n");
 }
 
 function isRedundantReturnHint(context) {
@@ -5753,15 +5724,8 @@ async function createKeywordReturnHover(
     markdown.appendMarkdown("**First-level access:**\n");
     markdown.appendCodeblock(context.simpleAccess.firstLevel.join("\n"), "robotframework");
     if (context.simpleAccess.secondLevel.length > 0) {
-      const hoverSecondLevelLimit = 24;
-      const shownSecondLevel = context.simpleAccess.secondLevel.slice(0, hoverSecondLevelLimit);
       markdown.appendMarkdown("\n**Second-level access:**\n");
-      markdown.appendCodeblock(shownSecondLevel.join("\n"), "robotframework");
-      if (context.simpleAccess.secondLevel.length > shownSecondLevel.length) {
-        markdown.appendMarkdown(
-          `\n_Showing first ${shownSecondLevel.length} of ${context.simpleAccess.secondLevel.length} second-level paths in hover._`
-        );
-      }
+      markdown.appendCodeblock(context.simpleAccess.secondLevel.join("\n"), "robotframework");
     }
     markdown.appendMarkdown("\n\n_Open **Robot Return Explorer** for full technical details._");
   } else if (context.returnAnnotation) {
@@ -8875,16 +8839,8 @@ async function createEnumValueHover(
     );
     for (let levelIndex = 0; levelIndex < returnHintAccessLevels.length; levelIndex += 1) {
       const levelPaths = returnHintAccessLevels[levelIndex];
-      const shownPaths = levelPaths.slice(0, 12);
       markdown.appendMarkdown(`\n**${formatAccessDepthLabel(levelIndex + 1)}:**\n`);
-      markdown.appendCodeblock(shownPaths.join("\n"), "robotframework");
-      if (levelPaths.length > shownPaths.length) {
-        markdown.appendMarkdown(
-          `\n_Showing first ${shownPaths.length} of ${levelPaths.length} ${formatAccessDepthLabel(
-            levelIndex + 1
-          ).toLowerCase()} paths._`
-        );
-      }
+      markdown.appendCodeblock(levelPaths.join("\n"), "robotframework");
     }
   }
 
@@ -11861,6 +11817,7 @@ module.exports = {
   deactivate,
   __test__: {
     parseStructuredTypesFromPythonSource,
-    finalizeStructuredTypeCamelCaseAccess
+    finalizeStructuredTypeCamelCaseAccess,
+    buildEnumPreviewMarkdown
   }
 };

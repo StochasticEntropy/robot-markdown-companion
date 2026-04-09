@@ -645,10 +645,35 @@ function runCompletionMatchingTests() {
   );
 }
 
+function runSecondLevelPreviewRenderingTests() {
+  const secondLevelPaths = Array.from({ length: 18 }, (_, index) => `\${value.child_${index + 1}.leaf}`);
+  const markdown = extensionTestApi.buildEnumPreviewMarkdown({
+    argumentName: "payload",
+    argumentValue: "${value}",
+    shownEnums: [],
+    annotationHints: [],
+    duplicateCandidateCount: 0,
+    returnHintContext: {
+      assignment: { keywordName: "Set Variable" },
+      simpleAccess: {
+        firstLevel: ["${value.child_1}"],
+        secondLevel: secondLevelPaths,
+        levels: [["${value.child_1}"], secondLevelPaths]
+      }
+    }
+  });
+
+  for (const path of secondLevelPaths) {
+    assert(markdown.includes(path));
+  }
+  assert(!markdown.includes("Showing first 12"));
+}
+
 runPythonCamelCaseDetectionTests();
 runPythonPropertyParsingTests();
 runPythonPropertyAliasParsingTests();
 runReturnFieldNameStyleTests();
 runPropertyInclusionTests();
 runCompletionMatchingTests();
+runSecondLevelPreviewRenderingTests();
 console.log("return-field-name-style tests passed");

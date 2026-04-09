@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.25
+
+- Removed the remaining second-level access truncation in hover and argument-value return previews, so second-level return paths now show in full by default instead of stopping after the first handful of entries.
+
 ## 0.4.24
 
 - Changed `robotCompanion.returnFieldNameStyle=camelcase` to render true lower camelCase aliases such as `statusCode`, `processInstanceId`, and `businessKey` instead of PascalCase-like names.
