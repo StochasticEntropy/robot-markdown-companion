@@ -10,7 +10,8 @@ const SIMPLE_RETURN_IGNORED_FIELD_NAMES = new Set([
 ]);
 const RETURN_FIELD_NAME_STYLES = new Set(["camelcase", "snake_case", "both"]);
 const TYPE_PREVIEW_CACHE_MAX_ENTRIES_DEFAULT = 400;
-const RETURN_TYPE_CACHE_SCHEMA_VERSION = 3;
+const RETURN_TYPE_CACHE_SCHEMA_VERSION = 4;
+const UNLIMITED_RETURN_FIELDS_PER_TYPE = Number.MAX_SAFE_INTEGER;
 
 const WORKSPACE_INDEXES = new Map();
 
@@ -205,6 +206,10 @@ function hydrateReturnWorkerIndexSnapshot(snapshot) {
         fields: (candidate?.fields || []).map((field) => ({
           name: String(field?.name || ""),
           annotation: String(field?.annotation || "")
+        })),
+        properties: (candidate?.properties || []).map((field) => ({
+          name: String(field?.name || ""),
+          annotation: String(field?.annotation || "")
         }))
       }))
     ),
@@ -307,11 +312,12 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
     return undefined;
   }
   const maxDepth = Math.max(1, Number(payload?.maxDepth) || 1);
-  const maxFieldsPerType = Math.max(1, Number(payload?.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(payload?.maxFieldsPerType, 0);
   const includeTechnical = Boolean(payload?.includeTechnical);
   const technicalMaxDepth = Math.max(0, Number(payload?.technicalMaxDepth) || 0);
   const technicalMaxFieldsPerType = Math.max(1, Number(payload?.technicalMaxFieldsPerType) || 1);
   const fieldNameStyle = normalizeReturnFieldNameStyle(payload?.fieldNameStyle);
+  const includeProperties = payload?.includeProperties !== false;
   const typePreferencesByName = hydrateTypePreferenceMap(payload?.typePreferencesByName);
   const subtypePolicy = hydrateSubtypePolicy(payload?.subtypePolicy);
   const returnTypeCacheKey = buildReturnTypeCacheKey({
@@ -323,7 +329,8 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
     maxFieldsPerType,
     technicalMaxDepth,
     technicalMaxFieldsPerType,
-    fieldNameStyle
+    fieldNameStyle,
+    includeProperties
   });
 
   let cacheEntry = getTypePreviewCacheEntry(workspaceEntry, returnTypeCacheKey);
@@ -336,6 +343,7 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
       typePreferencesByName,
       maxDepth,
       maxFieldsPerType,
+      includeProperties,
       dependencyFilePaths
     });
     const technicalStructureLines = buildReturnStructureLines(
@@ -346,6 +354,7 @@ function resolveOrBuildTypePreviewCacheEntry(workspaceEntry, payload) {
         maxFieldsPerType: technicalMaxFieldsPerType,
         typePreferencesByName,
         subtypePolicy,
+        includeProperties,
         dependencyFilePaths
       },
       "technical"
@@ -392,10 +401,11 @@ function buildReturnTypeCacheKey(options) {
     rootTypeNames: normalizedRootTypeNames,
     rootCollectionLike: Boolean(options?.rootCollectionLike),
     maxDepth: Math.max(1, Number(options?.maxDepth) || 1),
-    maxFieldsPerType: Math.max(1, Number(options?.maxFieldsPerType) || 1),
+    maxFieldsPerType: serializeReturnMaxFieldsPerType(options?.maxFieldsPerType),
     technicalMaxDepth: Math.max(0, Number(options?.technicalMaxDepth) || 0),
     technicalMaxFieldsPerType: Math.max(1, Number(options?.technicalMaxFieldsPerType) || 1),
     fieldNameStyle: normalizeReturnFieldNameStyle(options?.fieldNameStyle),
+    includeProperties: options?.includeProperties !== false,
     typePreferencesByName: normalizedTypePreferences,
     subtypePolicy: normalizedPolicy
   });
@@ -409,18 +419,42 @@ function normalizeReturnFieldNameStyle(value) {
   return "camelcase";
 }
 
+function normalizeReturnMaxFieldsPerTypeValue(value, fallback = 0) {
+  const raw = Number(value);
+  const normalizedFallback = Number(fallback);
+  if (!Number.isFinite(raw)) {
+    return Number.isFinite(normalizedFallback) ? normalizedFallback : 0;
+  }
+  if (raw <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.min(5000, Math.round(raw)));
+}
+
+function getEffectiveReturnMaxFieldsPerType(value) {
+  const normalized = normalizeReturnMaxFieldsPerTypeValue(value, 0);
+  return normalized === 0 ? UNLIMITED_RETURN_FIELDS_PER_TYPE : normalized;
+}
+
+function serializeReturnMaxFieldsPerType(value) {
+  const normalized = normalizeReturnMaxFieldsPerTypeValue(value, 0);
+  return normalized === 0 ? "all" : normalized;
+}
+
 function snakeToCamelCaseAccessSegment(segment) {
-  const parts = String(segment || "")
-    .trim()
-    .split("_")
-    .filter(Boolean);
-  if (parts.length === 0) {
+  const rawSegment = String(segment || "").trim();
+  if (!rawSegment) {
     return "";
   }
-  return parts
+  if (!rawSegment.includes("_")) {
+    return `${rawSegment[0].toUpperCase()}${rawSegment.slice(1)}`;
+  }
+  return rawSegment
+    .split("_")
+    .filter(Boolean)
     .map((part) => {
-      const lower = String(part || "").toLowerCase();
-      return lower ? `${lower[0].toUpperCase()}${lower.slice(1)}` : "";
+      const trimmedPart = String(part || "").trim();
+      return trimmedPart ? `${trimmedPart[0].toUpperCase()}${trimmedPart.slice(1)}` : "";
     })
     .join("");
 }
@@ -497,7 +531,7 @@ function buildVisibleTemplateSegmentVariants(levelTemplate, fieldNameStyle) {
 }
 
 function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(options.maxFieldsPerType, 0);
   const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
   const rootCollectionLike = Boolean(options.rootCollectionLike);
   const subtypePolicy = options.subtypePolicy;
@@ -521,8 +555,9 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
 
     for (const node of currentNodes) {
       const fields = collectDeclaredFieldsForTypes(node.typeNames, index, {
-        typePreferencesByName: node.typePreferencesByName
-      }).slice(0, maxFieldsPerType);
+        typePreferencesByName: node.typePreferencesByName,
+        includeProperties: options.includeProperties !== false
+      }).slice(0, getEffectiveReturnMaxFieldsPerType(maxFieldsPerType));
       for (const field of fields) {
         addDependencyFilePath(dependencyFilePaths, field.sourceFilePath);
         const segments = node.segments.concat(field.name);
@@ -1086,7 +1121,7 @@ function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple
 
   const normalizedMode = mode === "technical" ? "technical" : "simple";
   const maxDepth = Math.max(0, Number(options.maxDepth) || 0);
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(options.maxFieldsPerType, 0);
   const typePreferencesByName = cloneTypePreferenceMap(options.typePreferencesByName);
   const subtypePolicy = options.subtypePolicy;
   const dependencyFilePaths =
@@ -1102,6 +1137,7 @@ function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple
       ...renderIndexedTypeTree(typeName, index, 0, maxDepth, maxFieldsPerType, new Set(), normalizedMode, {
         typePreferencesByName,
         subtypePolicy,
+        includeProperties: options.includeProperties !== false,
         dependencyFilePaths
       })
     );
@@ -1200,6 +1236,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
   const subtypePolicy = options.subtypePolicy;
   const dependencyFilePaths =
     options.dependencyFilePaths instanceof Set ? options.dependencyFilePaths : new Set();
+  const effectiveMaxFieldsPerType = getEffectiveReturnMaxFieldsPerType(maxFieldsPerType);
   const normalizedSpecifier = normalizeStructuredTypeSpecifier(typeSpecifier);
   if (!normalizedSpecifier) {
     return [];
@@ -1222,7 +1259,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
     addDependencyFilePath(dependencyFilePaths, selectedEnum.filePath);
     const lines = [`${indent}${typeName} (enum)`];
     const members = selectedEnum.members || [];
-    const shownMembers = members.slice(0, Math.min(maxFieldsPerType, 15));
+    const shownMembers = members.slice(0, Math.min(effectiveMaxFieldsPerType, 15));
     for (const member of shownMembers) {
       lines.push(
         normalizedMode === "technical"
@@ -1261,8 +1298,8 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
   const nextVisited = new Set(visited);
   nextVisited.add(visitedKey);
 
-  const fields = selectedType.fields || [];
-  const shownFields = fields.slice(0, maxFieldsPerType);
+  const fields = getStructuredTypeDeclaredMembers(selectedType, options);
+  const shownFields = fields.slice(0, effectiveMaxFieldsPerType);
   for (const field of shownFields) {
     lines.push(normalizedMode === "technical" ? `${indent}  .${field.name}` : `${indent}  - ${field.name}`);
     if (depth >= maxDepth) {
@@ -1298,6 +1335,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
           {
             typePreferencesByName: nestedTypePreferences,
             subtypePolicy,
+            includeProperties: options.includeProperties !== false,
             dependencyFilePaths
           }
         )
@@ -1344,6 +1382,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
           {
             typePreferencesByName,
             subtypePolicy,
+            includeProperties: options.includeProperties !== false,
             dependencyFilePaths
           }
         )
@@ -1376,6 +1415,15 @@ function collectDeclaredFieldsForTypes(typeNames, index, options = {}) {
     );
   }
   return dedupeFieldDescriptorsByName(combinedFields);
+}
+
+function getStructuredTypeDeclaredMembers(structuredType, options = {}) {
+  const fields = Array.isArray(structuredType?.fields) ? structuredType.fields : [];
+  const properties =
+    options.includeProperties === false || !Array.isArray(structuredType?.properties)
+      ? []
+      : structuredType.properties;
+  return dedupeStructuredFields(fields.concat(properties));
 }
 
 function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {}) {
@@ -1415,7 +1463,7 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
   const sourceFilePath = String(selectedType.filePath || "");
   const sourceModulePath = String(selectedType.modulePath || "");
   const sourcePackagePath = String(index?.moduleInfoByFile?.get(sourceFilePath)?.packagePath || "");
-  const fields = dedupeStructuredFields(selectedType.fields || [])
+  const fields = getStructuredTypeDeclaredMembers(selectedType, options)
     .filter((field) => !SIMPLE_RETURN_IGNORED_FIELD_NAMES.has(normalizeComparableToken(field.name)))
     .map((field) => ({
       ...field,
@@ -1769,8 +1817,8 @@ function choosePreferredStructuredTypeDefinition(candidates, options = {}) {
       return rightDataclassScore - leftDataclassScore;
     }
 
-    const leftFieldCount = Array.isArray(left.fields) ? left.fields.length : 0;
-    const rightFieldCount = Array.isArray(right.fields) ? right.fields.length : 0;
+    const leftFieldCount = getStructuredTypeMemberCount(left);
+    const rightFieldCount = getStructuredTypeMemberCount(right);
     if (leftFieldCount !== rightFieldCount) {
       return rightFieldCount - leftFieldCount;
     }
@@ -1780,6 +1828,12 @@ function choosePreferredStructuredTypeDefinition(candidates, options = {}) {
     return leftQualifiedName.localeCompare(rightQualifiedName);
   });
   return sorted[0];
+}
+
+function getStructuredTypeMemberCount(structuredType) {
+  const fieldCount = Array.isArray(structuredType?.fields) ? structuredType.fields.length : 0;
+  const propertyCount = Array.isArray(structuredType?.properties) ? structuredType.properties.length : 0;
+  return fieldCount + propertyCount;
 }
 
 function choosePreferredEnumDefinition(candidates, options = {}) {
@@ -2170,6 +2224,7 @@ module.exports = {
     normalizeReturnFieldNameStyle,
     buildSimpleReturnAccessTemplate,
     bindSimpleReturnAccessTemplate,
-    collectReturnMemberCompletionCandidatesFromTemplate
+    collectReturnMemberCompletionCandidatesFromTemplate,
+    buildReturnStructureLines
   }
 };

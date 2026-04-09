@@ -95,6 +95,7 @@ const DEFAULT_INDEX_EXCLUDE_FOLDER_PATTERNS = [
 const GLOB_MAGIC_PATTERN = /[*?\[\]{}]/;
 const RETURN_SUBTYPE_RESOLUTION_MODES = new Set(["always", "never", "include", "exclude"]);
 const RETURN_FIELD_NAME_STYLES = new Set(["camelcase", "snake_case", "both"]);
+const UNLIMITED_RETURN_FIELDS_PER_TYPE = Number.MAX_SAFE_INTEGER;
 const ENUM_COMPLETION_DISPLAY_MODES = new Set(["name", "value", "both"]);
 const ROBOT_COMPANION_LOG_LEVELS = new Set(["off", "error", "warn", "info", "debug"]);
 const ROBOT_COMPANION_LOG_LEVEL_RANKS = new Map([
@@ -285,6 +286,7 @@ function buildReturnResolutionTypeDebug(index, rootTypeNames, typePreferencesByN
       candidateCount: candidates.length,
       selectedQualifiedName: String(selectedType?.qualifiedName || ""),
       selectedFieldCount: Array.isArray(selectedType?.fields) ? selectedType.fields.length : 0,
+      selectedPropertyCount: Array.isArray(selectedType?.properties) ? selectedType.properties.length : 0,
       selectedBaseTypeNames: uniqueStrings((selectedType?.baseTypeNames || []).map((value) => String(value || ""))),
       selectedBaseTypeRefs: (Array.isArray(selectedType?.baseTypeRefs) ? selectedType.baseTypeRefs : []).map((ref) => ({
         typeName: String(ref?.typeName || ""),
@@ -2945,7 +2947,8 @@ class RobotTypedVariableCompletionProvider {
       normalizedRootVariable,
       normalizedPathPrefix,
       completionMaxDepth,
-      getReturnFieldNameStyle()
+      getReturnFieldNameStyle(),
+      getReturnIncludeProperties() ? "1" : "0"
     ].join("|");
     const memoHit = this._memberCompletionMemo.get(memoKey);
     if (Array.isArray(memoHit)) {
@@ -5871,7 +5874,7 @@ async function resolveKeywordReturnPreviewFromVariableContext(
   });
   const rootTypeNames = returnTypeResolution.typeNames;
   const maxDepth = Math.max(1, Number(options.maxDepth) || 1);
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(options.maxFieldsPerType, 0);
   const technicalMaxDepth = getReturnTechnicalMaxDepth();
   const technicalMaxFieldsPerType = getReturnTechnicalMaxFieldsPerType();
   let simpleAccess = undefined;
@@ -5884,6 +5887,7 @@ async function resolveKeywordReturnPreviewFromVariableContext(
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
       fieldNameStyle: getReturnFieldNameStyle(),
+      includeProperties: getReturnIncludeProperties(),
       maxDepth,
       maxFieldsPerType,
       includeTechnical,
@@ -5911,7 +5915,8 @@ async function resolveKeywordReturnPreviewFromVariableContext(
       typePreferencesByName: returnTypeResolution.typePreferencesByName,
       resolutionContext: returnResolutionContext,
       maxDepth,
-      maxFieldsPerType
+      maxFieldsPerType,
+      includeProperties: getReturnIncludeProperties()
     });
   }
 
@@ -5924,7 +5929,8 @@ async function resolveKeywordReturnPreviewFromVariableContext(
             maxDepth: technicalMaxDepth,
             maxFieldsPerType: technicalMaxFieldsPerType,
             typePreferencesByName: returnTypeResolution.typePreferencesByName,
-            resolutionContext: returnResolutionContext
+            resolutionContext: returnResolutionContext,
+            includeProperties: getReturnIncludeProperties()
           },
           "technical"
         )
@@ -6189,6 +6195,7 @@ async function resolveReturnHintForArgumentValueFromAssignment(
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
       fieldNameStyle: getReturnFieldNameStyle(),
+      includeProperties: getReturnIncludeProperties(),
       maxDepth,
       maxFieldsPerType,
       includeTechnical: true,
@@ -6214,7 +6221,8 @@ async function resolveReturnHintForArgumentValueFromAssignment(
       typePreferencesByName: returnTypeResolution.typePreferencesByName,
       resolutionContext: returnResolutionContext,
       maxDepth,
-      maxFieldsPerType
+      maxFieldsPerType,
+      includeProperties: getReturnIncludeProperties()
     });
   }
 
@@ -6226,7 +6234,8 @@ async function resolveReturnHintForArgumentValueFromAssignment(
         maxDepth: technicalMaxDepth,
         maxFieldsPerType: technicalMaxFieldsPerType,
         typePreferencesByName: returnTypeResolution.typePreferencesByName,
-        resolutionContext: returnResolutionContext
+        resolutionContext: returnResolutionContext,
+        includeProperties: getReturnIncludeProperties()
       },
       "technical"
     );
@@ -6314,6 +6323,7 @@ async function resolveReturnMemberCompletionCandidatesForAssignment(
       rootCollectionLike: returnTypeResolution.hasCollectionSubtype,
       typePreferencesByName: serializeTypePreferenceMapEntries(returnTypeResolution.typePreferencesByName),
       fieldNameStyle: getReturnFieldNameStyle(),
+      includeProperties: getReturnIncludeProperties(),
       maxDepth: depthForCache,
       maxFieldsPerType,
       includeTechnical: false,
@@ -6335,7 +6345,8 @@ async function resolveReturnMemberCompletionCandidatesForAssignment(
     typePreferencesByName: returnTypeResolution.typePreferencesByName,
     resolutionContext: returnResolutionContext,
     maxDepth: depthForCache,
-    maxFieldsPerType
+    maxFieldsPerType,
+    includeProperties: getReturnIncludeProperties()
   });
   return collectReturnMemberCompletionCandidatesFromTemplate(
     simpleAccessTemplate,
@@ -7249,17 +7260,19 @@ function normalizeReturnFieldNameStyle(value) {
 }
 
 function snakeToCamelCaseAccessSegment(segment) {
-  const parts = String(segment || "")
-    .trim()
-    .split("_")
-    .filter(Boolean);
-  if (parts.length === 0) {
+  const rawSegment = String(segment || "").trim();
+  if (!rawSegment) {
     return "";
   }
-  return parts
+  if (!rawSegment.includes("_")) {
+    return `${rawSegment[0].toUpperCase()}${rawSegment.slice(1)}`;
+  }
+  return rawSegment
+    .split("_")
+    .filter(Boolean)
     .map((part) => {
-      const lower = String(part || "").toLowerCase();
-      return lower ? `${lower[0].toUpperCase()}${lower.slice(1)}` : "";
+      const trimmedPart = String(part || "").trim();
+      return trimmedPart ? `${trimmedPart[0].toUpperCase()}${trimmedPart.slice(1)}` : "";
     })
     .join("");
 }
@@ -7377,7 +7390,7 @@ function sanitizeSimpleAccessTemplate(template) {
 }
 
 function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(options.maxFieldsPerType, 0);
   const maxDepth = Math.max(1, Math.min(12, Number(options.maxDepth) || 2));
   const rootCollectionLike = Boolean(options.rootCollectionLike);
   const subtypePolicy = options.subtypePolicy || getReturnSubtypeResolutionPolicy(index);
@@ -7399,8 +7412,9 @@ function buildSimpleReturnAccessTemplate(rootTypeNames, index, options = {}) {
 
     for (const node of currentNodes) {
       const fields = collectDeclaredFieldsForTypes(node.typeNames, index, {
-        typePreferencesByName: node.typePreferencesByName
-      }).slice(0, maxFieldsPerType);
+        typePreferencesByName: node.typePreferencesByName,
+        includeProperties: options.includeProperties !== false
+      }).slice(0, getEffectiveReturnMaxFieldsPerType(maxFieldsPerType));
       for (const field of fields) {
         const segments = node.segments.concat(field.name);
         const fieldResolutionContext = buildTypeResolutionContextFromSource(
@@ -7604,6 +7618,15 @@ function collectDeclaredFieldsForTypes(typeNames, index, options = {}) {
   return dedupeFieldDescriptorsByName(combinedFields);
 }
 
+function getStructuredTypeDeclaredMembers(structuredType, options = {}) {
+  const fields = Array.isArray(structuredType?.fields) ? structuredType.fields : [];
+  const properties =
+    options.includeProperties === false || !Array.isArray(structuredType?.properties)
+      ? []
+      : structuredType.properties;
+  return dedupeStructuredFields(fields.concat(properties));
+}
+
 function normalizeStructuredTypeSpecifier(typeSpecifier) {
   if (typeof typeSpecifier === "string") {
     const typeName = String(typeSpecifier || "").trim();
@@ -7725,7 +7748,7 @@ function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {
   const sourceFilePath = String(selectedType.filePath || "");
   const sourceModulePath = String(selectedType.modulePath || "");
   const sourcePackagePath = String(index?.moduleInfoByFile?.get(sourceFilePath)?.packagePath || "");
-  const fields = dedupeStructuredFields(selectedType.fields || [])
+  const fields = getStructuredTypeDeclaredMembers(selectedType, options)
     .filter((field) => !SIMPLE_RETURN_IGNORED_FIELD_NAMES.has(normalizeComparableToken(field.name)))
     .map((field) => ({
       ...field,
@@ -7786,7 +7809,7 @@ function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple
 
   const normalizedMode = mode === "technical" ? "technical" : "simple";
   const maxDepth = Math.max(0, Number(options.maxDepth) || 0);
-  const maxFieldsPerType = Math.max(1, Number(options.maxFieldsPerType) || 1);
+  const maxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(options.maxFieldsPerType, 0);
   const typePreferencesByName = cloneTypePreferenceMap(options.typePreferencesByName);
   const subtypePolicy = options.subtypePolicy || getReturnSubtypeResolutionPolicy(index);
   const lines = [];
@@ -7799,7 +7822,8 @@ function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple
     lines.push(
       ...renderIndexedTypeTree(typeName, index, 0, maxDepth, maxFieldsPerType, new Set(), normalizedMode, {
         typePreferencesByName,
-        subtypePolicy
+        subtypePolicy,
+        includeProperties: options.includeProperties !== false
       })
     );
   }
@@ -7812,6 +7836,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
   const typePreferencesByName =
     options.typePreferencesByName instanceof Map ? options.typePreferencesByName : new Map();
   const subtypePolicy = options.subtypePolicy || getReturnSubtypeResolutionPolicy(index);
+  const effectiveMaxFieldsPerType = getEffectiveReturnMaxFieldsPerType(maxFieldsPerType);
   const normalizedSpecifier = normalizeStructuredTypeSpecifier(typeSpecifier);
   if (!normalizedSpecifier) {
     return [];
@@ -7833,7 +7858,7 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
     }
     const lines = [`${indent}${typeName} (enum)`];
     const members = selectedEnum.members || [];
-    const shownMembers = members.slice(0, Math.min(maxFieldsPerType, 15));
+    const shownMembers = members.slice(0, Math.min(effectiveMaxFieldsPerType, 15));
     for (const member of shownMembers) {
       lines.push(
         normalizedMode === "technical"
@@ -7871,8 +7896,8 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
   const nextVisited = new Set(visited);
   nextVisited.add(visitedKey);
 
-  const fields = selectedType.fields || [];
-  const shownFields = fields.slice(0, maxFieldsPerType);
+  const fields = getStructuredTypeDeclaredMembers(selectedType, options);
+  const shownFields = fields.slice(0, effectiveMaxFieldsPerType);
   for (const field of shownFields) {
     lines.push(
       normalizedMode === "technical"
@@ -7911,7 +7936,8 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
           normalizedMode,
           {
             typePreferencesByName: nestedTypePreferences,
-            subtypePolicy
+            subtypePolicy,
+            includeProperties: options.includeProperties !== false
           }
         )
       );
@@ -7956,7 +7982,8 @@ function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsP
             normalizedMode,
             {
               typePreferencesByName,
-              subtypePolicy
+              subtypePolicy,
+              includeProperties: options.includeProperties !== false
             }
           )
         );
@@ -7993,8 +8020,8 @@ function choosePreferredStructuredTypeDefinition(candidates, options = {}) {
       return rightDataclassScore - leftDataclassScore;
     }
 
-    const leftFieldCount = Array.isArray(left.fields) ? left.fields.length : 0;
-    const rightFieldCount = Array.isArray(right.fields) ? right.fields.length : 0;
+    const leftFieldCount = getStructuredTypeMemberCount(left);
+    const rightFieldCount = getStructuredTypeMemberCount(right);
     if (leftFieldCount !== rightFieldCount) {
       return rightFieldCount - leftFieldCount;
     }
@@ -8004,6 +8031,12 @@ function choosePreferredStructuredTypeDefinition(candidates, options = {}) {
     return leftQualifiedName.localeCompare(rightQualifiedName);
   });
   return sorted[0];
+}
+
+function getStructuredTypeMemberCount(structuredType) {
+  const fieldCount = Array.isArray(structuredType?.fields) ? structuredType.fields.length : 0;
+  const propertyCount = Array.isArray(structuredType?.properties) ? structuredType.properties.length : 0;
+  return fieldCount + propertyCount;
 }
 
 function finalizeStructuredTypeCamelCaseAccess(structuredTypesByName) {
@@ -8232,14 +8265,16 @@ function findLatestKeywordCallAssignmentForOwnerFromLookups(runtimeLookups, owne
 }
 
 function buildReturnContextCacheKey(variableContext, maxDepth, maxFieldsPerType, includeTechnical = true) {
+  const normalizedMaxFieldsPerType = normalizeReturnMaxFieldsPerTypeValue(maxFieldsPerType, 0);
   return [
     "return",
     String(variableContext?.owner?.id || ""),
     String(variableContext?.assignment?.id || ""),
     normalizeVariableLookupToken(variableContext?.variableToken?.token || ""),
     Math.max(0, Number(maxDepth) || 0),
-    Math.max(1, Number(maxFieldsPerType) || 1),
+    serializeReturnMaxFieldsPerType(normalizedMaxFieldsPerType),
     getReturnFieldNameStyle(),
+    getReturnIncludeProperties() ? "1" : "0",
     includeTechnical ? "full" : "simple",
     getReturnTechnicalMaxDepth(),
     getReturnTechnicalMaxFieldsPerType(),
@@ -8256,8 +8291,9 @@ function buildReturnHintContextCacheKey(ownerId, normalizedVariable, assignmentI
     String(normalizedVariable || ""),
     String(assignmentId || ""),
     Math.max(1, Number(maxDepth) || 1),
-    getReturnMaxFieldsPerType(),
+    serializeReturnMaxFieldsPerType(getReturnMaxFieldsPerType()),
     getReturnFieldNameStyle(),
+    getReturnIncludeProperties() ? "1" : "0",
     getReturnSubtypeResolutionMode(),
     getReturnSubtypeIncludeContainers().join(","),
     getReturnSubtypeExcludeContainers().join(",")
@@ -8318,8 +8354,9 @@ function buildReturnMemberCompletionCacheKey(
     String(activeSegment || ""),
     Math.max(1, Number(completionMaxDepth) || 1),
     getReturnPreviewMaxDepth(),
-    getReturnMaxFieldsPerType(),
+    serializeReturnMaxFieldsPerType(getReturnMaxFieldsPerType()),
     getReturnFieldNameStyle(),
+    getReturnIncludeProperties() ? "1" : "0",
     getReturnTechnicalMaxDepth(),
     getReturnTechnicalMaxFieldsPerType(),
     getReturnSubtypeResolutionMode(),
@@ -8385,6 +8422,10 @@ function serializeReturnWorkerIndexSnapshot(index) {
           })
           .filter(Boolean),
         fields: (candidate?.fields || []).map((field) => ({
+          name: String(field?.name || ""),
+          annotation: String(field?.annotation || "")
+        })),
+        properties: (candidate?.properties || []).map((field) => ({
           name: String(field?.name || ""),
           annotation: String(field?.annotation || "")
         }))
@@ -9642,6 +9683,8 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
     pendingDecorators = [];
 
     const fields = [];
+    const properties = [];
+    let pendingMemberDecorators = [];
     let hasIndexableMethod = false;
     let classBodyIndent = null;
     let inClassDocstring = false;
@@ -9683,21 +9726,33 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
           inClassDocstring = true;
           classDocstringDelimiter = delimiter;
         }
+        pendingMemberDecorators = [];
         continue;
       }
 
-      if (
-        nextTrimmed.startsWith("#") ||
-        nextTrimmed.startsWith("@") ||
-        nextTrimmed.startsWith("def ") ||
-        nextTrimmed.startsWith("async def ") ||
-        nextTrimmed.startsWith("class ")
-      ) {
+      if (nextTrimmed.startsWith("#")) {
+        pendingMemberDecorators = [];
+        continue;
+      }
+
+      if (nextTrimmed.startsWith("@")) {
+        pendingMemberDecorators.push(nextTrimmed);
+        continue;
+      }
+
+      if (nextTrimmed.startsWith("def ") || nextTrimmed.startsWith("async def ") || nextTrimmed.startsWith("class ")) {
         if (/^(?:async\s+def|def)\s+(__getitem__|__iter__)\s*\(/.test(nextTrimmed)) {
           hasIndexableMethod = true;
         }
+        const propertyDefinition = parsePythonPropertyDefinition(nextTrimmed, pendingMemberDecorators);
+        pendingMemberDecorators = [];
+        if (propertyDefinition) {
+          properties.push(propertyDefinition);
+        }
         continue;
       }
+
+      pendingMemberDecorators = [];
 
       const fieldMatch = nextLine.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^#=]+?)(?:\s*=\s*.+)?$/);
       if (!fieldMatch) {
@@ -9723,8 +9778,15 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
     lineIndex = nextTopLevelIndex - 1;
 
     const uniqueFields = dedupeStructuredFields(fields);
+    const parsedClassProperties = parsePythonPropertyDefinitionsFromClassBody(
+      lines,
+      headerEndIndex + 1,
+      nextTopLevelIndex,
+      classBodyIndent
+    );
+    const uniqueProperties = dedupeStructuredFields(properties.concat(parsedClassProperties));
 
-    if (uniqueFields.length === 0 && baseTypeNames.length === 0) {
+    if (uniqueFields.length === 0 && uniqueProperties.length === 0 && baseTypeNames.length === 0) {
       continue;
     }
 
@@ -9735,11 +9797,66 @@ function parseStructuredTypesFromPythonSource(source, filePath) {
       isIndexableWrapper: hasIndexableMethod,
       supportsCamelCaseAccess: Boolean(supportsCamelCaseAccess),
       baseTypeNames,
-      fields: uniqueFields
+      fields: uniqueFields,
+      properties: uniqueProperties
     });
   }
 
   return structuredTypes;
+}
+
+function parsePythonPropertyDefinition(definitionLine, decorators = []) {
+  const normalizedDecorators = (Array.isArray(decorators) ? decorators : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (!normalizedDecorators.some((decorator) => decorator === "@property")) {
+    return undefined;
+  }
+
+  const match = String(definitionLine || "").match(
+    /^(?:async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*self\s*\)\s*->\s*([^:]+)\s*:/
+  );
+  if (!match) {
+    return undefined;
+  }
+
+  const name = String(match[1] || "").trim();
+  const annotation = String(match[2] || "").trim().replace(/,$/, "");
+  if (!name || !annotation || name.startsWith("_")) {
+    return undefined;
+  }
+
+  return {
+    name,
+    annotation
+  };
+}
+
+function parsePythonPropertyDefinitionsFromClassBody(lines, startIndex, endIndex, classBodyIndent) {
+  const properties = [];
+  const bodyIndent = Number.isFinite(Number(classBodyIndent)) ? Math.max(0, Number(classBodyIndent)) : null;
+  if (!Array.isArray(lines) || bodyIndent === null) {
+    return properties;
+  }
+
+  const classBodySource = lines
+    .slice(Math.max(0, Number(startIndex) || 0), Math.max(0, Number(endIndex) || 0))
+    .join("\n");
+  const indentPattern = `[ \\t]{${bodyIndent}}`;
+  const propertyPattern = new RegExp(
+    `^${indentPattern}@property\\s*$\\r?\\n^${indentPattern}((?:async\\s+def|def)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\(\\s*self\\s*\\)\\s*->\\s*[^\\n:]+\\s*:)`,
+    "gm"
+  );
+
+  for (const match of classBodySource.matchAll(propertyPattern)) {
+    const definitionLine = String(match[1] || "").trim();
+    const propertyDefinition = parsePythonPropertyDefinition(definitionLine, ["@property"]);
+    if (propertyDefinition) {
+      properties.push(propertyDefinition);
+    }
+  }
+
+  return properties;
 }
 
 function dedupeStructuredFields(fields) {
@@ -11568,6 +11685,10 @@ function getReturnFieldNameStyle() {
   return "camelcase";
 }
 
+function getReturnIncludeProperties() {
+  return getConfig().get("returnIncludeProperties", true) !== false;
+}
+
 function getReturnSubtypeResolutionMode() {
   const rawMode = String(getConfig().get("returnSubtypeResolutionMode", "always") || "always")
     .trim()
@@ -11647,11 +11768,29 @@ function getReturnHintArgumentMaxDepth() {
 }
 
 function getReturnMaxFieldsPerType() {
-  const raw = Number(getConfig().get("returnMaxFieldsPerType", 12));
+  return normalizeReturnMaxFieldsPerTypeValue(getConfig().get("returnMaxFieldsPerType", 0), 0);
+}
+
+function normalizeReturnMaxFieldsPerTypeValue(value, fallback = 0) {
+  const raw = Number(value);
+  const normalizedFallback = Number(fallback);
   if (!Number.isFinite(raw)) {
-    return 12;
+    return Number.isFinite(normalizedFallback) ? normalizedFallback : 0;
   }
-  return Math.max(1, Math.min(500, Math.round(raw)));
+  if (raw <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.min(5000, Math.round(raw)));
+}
+
+function getEffectiveReturnMaxFieldsPerType(value) {
+  const normalized = normalizeReturnMaxFieldsPerTypeValue(value, 0);
+  return normalized === 0 ? UNLIMITED_RETURN_FIELDS_PER_TYPE : normalized;
+}
+
+function serializeReturnMaxFieldsPerType(value) {
+  const normalized = normalizeReturnMaxFieldsPerTypeValue(value, 0);
+  return normalized === 0 ? "all" : String(normalized);
 }
 
 function getReturnTechnicalMaxDepth() {

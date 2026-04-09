@@ -127,7 +127,8 @@ function createIndex(structuredTypes) {
       supportsCamelCaseAccess: Boolean(structuredType.supportsCamelCaseAccess),
       baseTypeNames: structuredType.baseTypeNames || [],
       baseTypeRefs: structuredType.baseTypeRefs || [],
-      fields: structuredType.fields || []
+      fields: structuredType.fields || [],
+      properties: structuredType.properties || []
     };
     const existing = structuredTypesByName.get(candidate.name) || [];
     existing.push(candidate);
@@ -188,6 +189,30 @@ class PlainChild(PlainBase):
   assert.strictEqual(structuredTypesByName.get("CamelChild")[0].supportsCamelCaseAccess, true);
   assert.strictEqual(structuredTypesByName.get("PlainBase")[0].supportsCamelCaseAccess, false);
   assert.strictEqual(structuredTypesByName.get("PlainChild")[0].supportsCamelCaseAccess, false);
+}
+
+function runPythonPropertyParsingTests() {
+  const source = `
+class PropertyOnly:
+    @property
+    def business_key(self) -> str | None:
+        return None
+
+    @property
+    def process_definition_key(self) -> str | None:
+        return self.business_key
+`;
+  const parsedTypes = extensionTestApi.parseStructuredTypesFromPythonSource(source, "/tmp/property_detection.py");
+  const propertyOnly = getOnlyStructuredType(parsedTypes, "PropertyOnly");
+  assert(propertyOnly);
+  assert.deepStrictEqual(
+    propertyOnly.properties.map((property) => property.name),
+    ["business_key", "process_definition_key"]
+  );
+  assert.deepStrictEqual(
+    propertyOnly.properties.map((property) => property.annotation),
+    ["str | None", "str | None"]
+  );
 }
 
 function runReturnFieldNameStyleTests() {
@@ -297,6 +322,106 @@ function runReturnFieldNameStyleTests() {
   assert(inheritedCamelOnly.secondLevel.includes("${wrapped.ProcessInstance.BusinessKey}"));
 }
 
+function runPropertyInclusionTests() {
+  const index = createIndex([
+    {
+      name: "PropertyPayload",
+      filePath: "/tmp/models/property_payload.py",
+      modulePath: "tests.models.property_payload",
+      qualifiedName: "tests.models.property_payload.PropertyPayload",
+      supportsCamelCaseAccess: true,
+      fields: [{ name: "status_code", annotation: "str" }],
+      properties: [
+        { name: "business_key", annotation: "str" },
+        { name: "businessKey", annotation: "str" }
+      ]
+    }
+  ]);
+
+  const withPropertiesTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["PropertyPayload"], index, {
+    maxDepth: 1,
+    maxFieldsPerType: 10,
+    includeProperties: true
+  });
+  const camelOnly = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${payload}",
+    withPropertiesTemplate,
+    "camelcase"
+  );
+  assert.deepStrictEqual(camelOnly.firstLevel, ["${payload.StatusCode}", "${payload.BusinessKey}"]);
+
+  const snakeOnly = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${payload}",
+    withPropertiesTemplate,
+    "snake_case"
+  );
+  assert(snakeOnly.firstLevel.includes("${payload.status_code}"));
+  assert(snakeOnly.firstLevel.includes("${payload.business_key}"));
+  assert(snakeOnly.firstLevel.includes("${payload.businessKey}"));
+
+  const withoutPropertiesTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["PropertyPayload"], index, {
+    maxDepth: 1,
+    maxFieldsPerType: 10,
+    includeProperties: false
+  });
+  const withoutProperties = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${payload}",
+    withoutPropertiesTemplate,
+    "camelcase"
+  );
+  assert.deepStrictEqual(withoutProperties.firstLevel, ["${payload.StatusCode}"]);
+
+  const technicalWithProperties = workerTestApi.buildReturnStructureLines(
+    ["PropertyPayload"],
+    index,
+    {
+      maxDepth: 1,
+      maxFieldsPerType: 10,
+      includeProperties: true
+    },
+    "technical"
+  );
+  assert(technicalWithProperties.some((line) => line.includes(".business_key")));
+  assert(technicalWithProperties.some((line) => line.includes(".businessKey")));
+
+  const technicalWithoutProperties = workerTestApi.buildReturnStructureLines(
+    ["PropertyPayload"],
+    index,
+    {
+      maxDepth: 1,
+      maxFieldsPerType: 10,
+      includeProperties: false
+    },
+    "technical"
+  );
+  assert(!technicalWithoutProperties.some((line) => line.includes(".business_key")));
+  assert(!technicalWithoutProperties.some((line) => line.includes(".businessKey")));
+
+  const unlimitedIndex = createIndex([
+    {
+      name: "WidePayload",
+      filePath: "/tmp/models/wide_payload.py",
+      modulePath: "tests.models.wide_payload",
+      qualifiedName: "tests.models.wide_payload.WidePayload",
+      supportsCamelCaseAccess: false,
+      fields: Array.from({ length: 13 }, (_, index) => ({
+        name: `field_${index + 1}`,
+        annotation: "str"
+      }))
+    }
+  ]);
+  const unlimitedTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["WidePayload"], unlimitedIndex, {
+    maxDepth: 1,
+    maxFieldsPerType: 0
+  });
+  const unlimitedAccess = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${wide}",
+    unlimitedTemplate,
+    "snake_case"
+  );
+  assert.strictEqual(unlimitedAccess.firstLevel.length, 13);
+}
+
 function runCompletionMatchingTests() {
   const index = createIndex([
     {
@@ -377,9 +502,55 @@ function runCompletionMatchingTests() {
     nestedFromRawPath.map((candidate) => candidate.insertText),
     ["BusinessKey"]
   );
+
+  const propertyIndex = createIndex([
+    {
+      name: "PropertyPayload",
+      filePath: "/tmp/models/property_payload.py",
+      modulePath: "tests.models.property_payload",
+      qualifiedName: "tests.models.property_payload.PropertyPayload",
+      supportsCamelCaseAccess: true,
+      fields: [{ name: "status_code", annotation: "str" }],
+      properties: [
+        { name: "business_key", annotation: "str" },
+        { name: "businessKey", annotation: "str" }
+      ]
+    }
+  ]);
+
+  const propertyTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["PropertyPayload"], propertyIndex, {
+    maxDepth: 1,
+    maxFieldsPerType: 10,
+    includeProperties: true
+  });
+  const propertyPrefix = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
+    propertyTemplate,
+    [],
+    "business",
+    1,
+    "camelcase"
+  );
+  assert.deepStrictEqual(
+    propertyPrefix.map((candidate) => candidate.insertText),
+    ["BusinessKey"]
+  );
+
+  const propertyPrefixSnake = workerTestApi.collectReturnMemberCompletionCandidatesFromTemplate(
+    propertyTemplate,
+    [],
+    "business",
+    1,
+    "snake_case"
+  );
+  assert.deepStrictEqual(
+    propertyPrefixSnake.map((candidate) => candidate.insertText),
+    ["business_key", "businessKey"]
+  );
 }
 
 runPythonCamelCaseDetectionTests();
+runPythonPropertyParsingTests();
 runReturnFieldNameStyleTests();
+runPropertyInclusionTests();
 runCompletionMatchingTests();
 console.log("return-field-name-style tests passed");

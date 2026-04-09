@@ -38,6 +38,7 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
 - `robotCompanion.enableTypedVariableCompletions`
 - `robotCompanion.enableReturnMemberCompletions`
 - `robotCompanion.returnFieldNameStyle`
+- `robotCompanion.returnIncludeProperties`
 - `robotCompanion.returnMemberCompletionMaxDepth`
 - `robotCompanion.enableReturnValueHover`
 - `robotCompanion.enableReturnExplorer`
@@ -78,6 +79,8 @@ Index pattern examples:
 - `${var.}` member completions in named-argument values reuse the same worker return-type cache (memory + disk); first request may be cold, follow-up keystrokes are cache-first.
 - Enum completions after `arg=` can be configured to show enum `name`, `value`, or `both`; default is `name`.
 - Return member access can be rendered as CamelCaseBase-style aliases (`StatusCode`), raw `snake_case`, or both via `robotCompanion.returnFieldNameStyle`; the default is `camelcase`.
+- Python `@property` members can be included or hidden in return hover/explorer/member access via `robotCompanion.returnIncludeProperties`; the default is `true`.
+- `robotCompanion.returnMaxFieldsPerType` defaults to `0`, which means return access lists are unlimited unless you set an explicit cap.
 - CamelCase aliases are only shown for return types that actually support CamelCase access. Technical return details stay on the raw source field names.
 - Worker return-type cache can be persisted per workspace (`enableReturnTypeDiskCache`) and is reused on startup when index fingerprint matches.
 - Keyword-doc view is best-effort: ambiguous matches or parse quirks show a warning banner, but content still renders.

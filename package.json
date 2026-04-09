@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Robot Companion for Robot Framework: return/value/enum intelligence with synchronized documentation preview.",
-  "version": "0.4.20",
+  "version": "0.4.22",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -190,6 +190,11 @@
           "default": "camelcase",
           "description": "Controls whether return hover/explorer/member access uses CamelCaseBase-style aliases (`StatusCode`), raw `snake_case`, or both when the resolved Python class supports CamelCase access."
         },
+        "robotCompanion.returnIncludeProperties": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include Python `@property` members in return hover/explorer/member access and technical return details when they are indexed from the resolved return type."
+        },
         "robotCompanion.returnMemberCompletionMaxDepth": {
           "type": "number",
           "default": 2,
@@ -329,10 +334,10 @@
         },
         "robotCompanion.returnMaxFieldsPerType": {
           "type": "number",
-          "default": 12,
-          "minimum": 1,
-          "maximum": 500,
-          "description": "Maximum number of fields shown per return object type."
+          "default": 0,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Maximum number of fields shown per return object type. Set to `0` for no limit."
         },
         "robotCompanion.returnTechnicalMaxDepth": {
           "type": "number",

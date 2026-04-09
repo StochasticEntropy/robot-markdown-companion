@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.22
+
+- Changed `robotCompanion.returnMaxFieldsPerType` to default to `0` (unlimited), so larger return types like `Partner` no longer hide later properties just because earlier fields filled the first-level access list.
+
+## 0.4.21
+
+- Added configurable `robotCompanion.returnIncludeProperties` (default `true`) so Python `@property` members can be shown or hidden in return hover, Return Explorer access lists, technical return details, argument-value return hints, and `${var.}` member completions.
+- Indexed Python `@property` getters as return members and preserved their CamelCase-aware aliases, including already-camelCase property names such as `businessKey -> BusinessKey`.
+
 ## 0.4.20
 
 - Fixed CamelCase return-member rendering for inherited fields, so CamelCase-capable wrapper responses also expose inherited members like `ProcessInstance` in the configured `camelcase` mode instead of mixing `snake_case` top-level segments with CamelCase nested members.
