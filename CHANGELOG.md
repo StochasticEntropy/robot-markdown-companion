@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.13
+
+- Fixed fully qualified inherited return type resolution for structured types.
+- Return previews, technical details, and member completions now follow aliased base classes precisely, so inherited fields remain available even when simple class names collide across modules.
+- This fixes cases such as `BAVL Zahllauf-Durchführen Ausführen - CamundaTimedProcess`, where `BAVL.Libs.models.process_instance.ProcessInstance` inherits its visible fields from `Common.Libs.entities.camunda_process_instance.ProcessInstance`.
+
 ## 0.4.12
 
 - Added `robotCompanion.enumCompletionDisplayMode` with options `name`, `value`, and `both`.

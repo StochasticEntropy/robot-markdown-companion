@@ -815,18 +815,33 @@ class RobotEnumHintService {
       };
     });
 
-    const structuredTypeDefinitions = parseStructuredTypesFromPythonSource(sourceText, filePath).map(
-      (structuredTypeDefinition) => {
-        const qualifiedName = moduleInfo.modulePath
-          ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
-          : structuredTypeDefinition.name;
-        return {
-          ...structuredTypeDefinition,
-          modulePath: moduleInfo.modulePath,
-          qualifiedName
-        };
-      }
+    const parsedStructuredTypeDefinitions = parseStructuredTypesFromPythonSource(sourceText, filePath);
+    const localStructuredTypeNames = new Set(
+      parsedStructuredTypeDefinitions.map((structuredTypeDefinition) => structuredTypeDefinition.name)
     );
+    const structuredTypeResolutionContext = {
+      sourceFilePath: filePath,
+      modulePath: moduleInfo.modulePath,
+      packagePath: moduleInfo.packagePath,
+      localStructuredTypeNames,
+      localEnumNames: new Set(enumDefinitions.map((enumDefinition) => enumDefinition.name)),
+      typeImportAliases: cloneTypeImportAliasesMap(parsedImports.typeImportAliases),
+      moduleImportAliases: new Map(parsedImports.moduleImportAliases || [])
+    };
+    const structuredTypeDefinitions = parsedStructuredTypeDefinitions.map((structuredTypeDefinition) => {
+      const qualifiedName = moduleInfo.modulePath
+        ? `${moduleInfo.modulePath}.${structuredTypeDefinition.name}`
+        : structuredTypeDefinition.name;
+      return {
+        ...structuredTypeDefinition,
+        modulePath: moduleInfo.modulePath,
+        qualifiedName,
+        baseTypeRefs: resolveStructuredBaseTypeReferences(
+          structuredTypeDefinition.baseTypeNames,
+          structuredTypeResolutionContext
+        )
+      };
+    });
 
     const keywordDefinitions = sourceText.includes("@keyword")
       ? parseKeywordEnumHintsFromPythonSource(sourceText, filePath)
@@ -838,9 +853,7 @@ class RobotEnumHintService {
       enumDefinitions,
       structuredTypeDefinitions,
       localEnumNames: new Set(enumDefinitions.map((enumDefinition) => enumDefinition.name)),
-      localStructuredTypeNames: new Set(
-        structuredTypeDefinitions.map((structuredTypeDefinition) => structuredTypeDefinition.name)
-      ),
+      localStructuredTypeNames,
       enumImportAliases,
       typeImportAliases: parsedImports.typeImportAliases,
       moduleImportAliases: parsedImports.moduleImportAliases,
@@ -6279,6 +6292,103 @@ function buildTypeResolutionContextFromStructuredType(index, structuredType) {
   );
 }
 
+function resolveStructuredBaseTypeReferences(baseTypeNames, resolutionContext) {
+  const references = [];
+  const seenReferences = new Set();
+
+  for (const rawBaseTypeName of uniqueStrings((baseTypeNames || []).map((value) => String(value || "").trim()))) {
+    if (!rawBaseTypeName) {
+      continue;
+    }
+
+    const preferredQualifiedNames = resolveQualifiedTypeReferencesWithoutIndex(rawBaseTypeName, resolutionContext);
+    const typeName = extractTypeSimpleName(preferredQualifiedNames[0] || rawBaseTypeName);
+    if (!typeName) {
+      continue;
+    }
+
+    const key = JSON.stringify({
+      typeName: normalizeComparableToken(typeName),
+      preferredQualifiedNames
+    });
+    if (seenReferences.has(key)) {
+      continue;
+    }
+    seenReferences.add(key);
+    references.push({
+      typeName,
+      preferredQualifiedNames
+    });
+  }
+
+  return references;
+}
+
+function resolveQualifiedTypeReferencesWithoutIndex(typeToken, resolutionContext) {
+  const rawTypeName = String(typeToken || "").trim();
+  if (!rawTypeName) {
+    return [];
+  }
+
+  const simpleName = extractTypeSimpleName(rawTypeName);
+  if (!simpleName) {
+    return [];
+  }
+
+  const preferredQualifiedNames = [];
+  const addPreferredQualifiedName = (qualifiedName) => {
+    const normalizedQualifiedName = normalizeQualifiedTypeName(qualifiedName);
+    if (!normalizedQualifiedName) {
+      return;
+    }
+    preferredQualifiedNames.push(normalizedQualifiedName);
+  };
+
+  addPreferredQualifiedName(rawTypeName);
+
+  if (resolutionContext) {
+    const dottedMatch = rawTypeName.match(/^([A-Za-z_][A-Za-z0-9_]*)\.(.+)$/);
+    if (dottedMatch) {
+      const moduleAlias = String(dottedMatch[1] || "").trim();
+      const remainder = String(dottedMatch[2] || "").trim();
+      const modulePath = String(resolutionContext.moduleImportAliases?.get(moduleAlias) || "").trim();
+      if (modulePath && remainder) {
+        addPreferredQualifiedName(`${modulePath}.${remainder}`);
+        addPreferredQualifiedName(`${modulePath}.${extractTypeSimpleName(remainder)}`);
+      }
+      const aliasImports = resolutionContext.typeImportAliases?.get(moduleAlias) || [];
+      for (const importSpec of aliasImports) {
+        const importModulePath = String(importSpec?.modulePath || "").trim();
+        const importSymbolName = String(importSpec?.symbolName || "").trim();
+        if (!importModulePath || !importSymbolName || !remainder) {
+          continue;
+        }
+        addPreferredQualifiedName(`${importModulePath}.${importSymbolName}.${remainder}`);
+        addPreferredQualifiedName(
+          `${importModulePath}.${importSymbolName}.${extractTypeSimpleName(remainder)}`
+        );
+      }
+    }
+
+    const directImports = []
+      .concat(resolutionContext.typeImportAliases?.get(rawTypeName) || [])
+      .concat(resolutionContext.typeImportAliases?.get(simpleName) || []);
+    for (const importSpec of directImports) {
+      addPreferredQualifiedName(
+        `${String(importSpec?.modulePath || "").trim()}.${String(importSpec?.symbolName || "").trim()}`
+      );
+    }
+
+    const isLocalStructuredType = resolutionContext.localStructuredTypeNames?.has(simpleName);
+    const isLocalEnumType = resolutionContext.localEnumNames?.has(simpleName);
+    if ((isLocalStructuredType || isLocalEnumType) && resolutionContext.modulePath) {
+      addPreferredQualifiedName(`${resolutionContext.modulePath}.${simpleName}`);
+    }
+  }
+
+  return uniqueStrings(preferredQualifiedNames);
+}
+
 function extractIndexedTypeNamesFromAnnotation(annotation, index, options = {}) {
   return resolveIndexedTypesFromAnnotation(annotation, index, options).typeNames;
 }
@@ -6924,31 +7034,134 @@ function normalizeIndexedSegmentPositions(rawIndexedPositions, segmentCount) {
 function collectDeclaredFieldsForTypes(typeNames, index, options = {}) {
   const combinedFields = [];
   for (const typeName of uniqueStrings(typeNames || [])) {
-    combinedFields.push(...collectDeclaredFieldsForType(typeName, index, new Set(), options));
+    combinedFields.push(
+      ...collectDeclaredFieldsForType(
+        {
+          typeName,
+          displayName: typeName
+        },
+        index,
+        new Set(),
+        options
+      )
+    );
   }
   return dedupeFieldDescriptorsByName(combinedFields);
 }
 
-function collectDeclaredFieldsForType(typeName, index, visited, options = {}) {
-  const normalizedTypeName = normalizeComparableToken(typeName);
-  if (visited.has(normalizedTypeName)) {
+function normalizeStructuredTypeSpecifier(typeSpecifier) {
+  if (typeof typeSpecifier === "string") {
+    const typeName = String(typeSpecifier || "").trim();
+    if (!typeName) {
+      return undefined;
+    }
+    return {
+      typeName,
+      displayName: typeName,
+      preferredQualifiedNames: []
+    };
+  }
+
+  const typeName = String(typeSpecifier?.typeName || "").trim();
+  if (!typeName) {
+    return undefined;
+  }
+
+  return {
+    typeName,
+    displayName: String(typeSpecifier?.displayName || typeName).trim() || typeName,
+    preferredQualifiedNames: uniqueStrings(
+      (Array.isArray(typeSpecifier?.preferredQualifiedNames) ? typeSpecifier.preferredQualifiedNames : [])
+        .map((value) => normalizeQualifiedTypeName(value))
+        .filter(Boolean)
+    )
+  };
+}
+
+function getStructuredTypeVisitedKey(typeName, selectedType, preferredQualifiedNames = []) {
+  const selectedQualifiedName = normalizeQualifiedTypeName(selectedType?.qualifiedName || "");
+  if (selectedQualifiedName) {
+    return selectedQualifiedName;
+  }
+  const preferredQualifiedName = normalizeQualifiedTypeName(preferredQualifiedNames[0] || "");
+  if (preferredQualifiedName) {
+    return preferredQualifiedName;
+  }
+  return normalizeComparableToken(typeName);
+}
+
+function resolveInheritedStructuredTypeSpecifiers(selectedType, index) {
+  const explicitRefs =
+    Array.isArray(selectedType?.baseTypeRefs) && selectedType.baseTypeRefs.length > 0
+      ? selectedType.baseTypeRefs
+      : uniqueStrings((selectedType?.baseTypeNames || []).map((value) => String(value || "").trim())).map(
+          (typeName) => ({
+            typeName,
+            preferredQualifiedNames: []
+          })
+        );
+  const resolvedRefs = [];
+  const seenRefs = new Set();
+
+  for (const baseTypeRef of explicitRefs) {
+    const normalizedRef = normalizeStructuredTypeSpecifier(baseTypeRef);
+    if (!normalizedRef) {
+      continue;
+    }
+    const structuredTypeCandidates = index?.structuredTypesByName?.get(normalizedRef.typeName) || [];
+    const matchingCandidates =
+      normalizedRef.preferredQualifiedNames.length > 0
+        ? structuredTypeCandidates.filter((candidate) =>
+            normalizedRef.preferredQualifiedNames.includes(normalizeQualifiedTypeName(candidate?.qualifiedName || ""))
+          )
+        : structuredTypeCandidates;
+    const usableCandidates = matchingCandidates.length > 0 ? matchingCandidates : structuredTypeCandidates;
+    if (!usableCandidates.some((candidate) => candidate?.isDataclass)) {
+      continue;
+    }
+    const key = JSON.stringify({
+      typeName: normalizeComparableToken(normalizedRef.typeName),
+      preferredQualifiedNames: normalizedRef.preferredQualifiedNames
+    });
+    if (seenRefs.has(key)) {
+      continue;
+    }
+    seenRefs.add(key);
+    resolvedRefs.push(normalizedRef);
+  }
+
+  return resolvedRefs;
+}
+
+function collectDeclaredFieldsForType(typeSpecifier, index, visited, options = {}) {
+  const normalizedSpecifier = normalizeStructuredTypeSpecifier(typeSpecifier);
+  if (!normalizedSpecifier) {
     return [];
   }
+  const typeName = normalizedSpecifier.typeName;
+  const normalizedTypeName = normalizeComparableToken(typeName);
 
   const structuredTypeCandidates = index.structuredTypesByName?.get(typeName) || [];
   if (structuredTypeCandidates.length === 0) {
     return [];
   }
 
-  const preferredQualifiedNames = getPreferredQualifiedNamesForType(options.typePreferencesByName, typeName);
+  const preferredQualifiedNames =
+    normalizedSpecifier.preferredQualifiedNames.length > 0
+      ? normalizedSpecifier.preferredQualifiedNames
+      : getPreferredQualifiedNamesForType(options.typePreferencesByName, typeName);
   const selectedType = choosePreferredStructuredTypeDefinition(structuredTypeCandidates, {
     preferredQualifiedNames
   });
   if (!selectedType) {
     return [];
   }
+  const visitedKey = getStructuredTypeVisitedKey(typeName, selectedType, preferredQualifiedNames);
+  if (visited.has(visitedKey) || visited.has(normalizedTypeName)) {
+    return [];
+  }
   const nextVisited = new Set(visited);
-  nextVisited.add(normalizedTypeName);
+  nextVisited.add(visitedKey);
 
   const sourceFilePath = String(selectedType.filePath || "");
   const sourceModulePath = String(selectedType.modulePath || "");
@@ -6962,15 +7175,17 @@ function collectDeclaredFieldsForType(typeName, index, visited, options = {}) {
       sourcePackagePath
     }));
 
-  const inheritedTypeNames = (selectedType.baseTypeNames || []).filter(
-    (baseTypeName) =>
-      normalizeComparableToken(baseTypeName) !== normalizedTypeName &&
-      (index.structuredTypesByName?.get(baseTypeName) || []).some((candidate) => candidate.isDataclass)
-  );
-
   const inheritedFields = [];
-  for (const inheritedTypeName of inheritedTypeNames) {
-    inheritedFields.push(...collectDeclaredFieldsForType(inheritedTypeName, index, nextVisited, options));
+  for (const inheritedTypeSpecifier of resolveInheritedStructuredTypeSpecifiers(selectedType, index)) {
+    const inheritedVisitedKey = getStructuredTypeVisitedKey(
+      inheritedTypeSpecifier.typeName,
+      undefined,
+      inheritedTypeSpecifier.preferredQualifiedNames
+    );
+    if (inheritedVisitedKey === visitedKey) {
+      continue;
+    }
+    inheritedFields.push(...collectDeclaredFieldsForType(inheritedTypeSpecifier, index, nextVisited, options));
   }
 
   return dedupeFieldDescriptorsByName(fields.concat(inheritedFields));
@@ -7018,18 +7233,21 @@ function buildReturnStructureLines(rootTypeNames, index, options, mode = "simple
   return lines;
 }
 
-function renderIndexedTypeTree(typeName, index, depth, maxDepth, maxFieldsPerType, visited, mode, options = {}) {
+function renderIndexedTypeTree(typeSpecifier, index, depth, maxDepth, maxFieldsPerType, visited, mode, options = {}) {
   const normalizedMode = mode === "technical" ? "technical" : "simple";
   const typePreferencesByName =
     options.typePreferencesByName instanceof Map ? options.typePreferencesByName : new Map();
   const subtypePolicy = options.subtypePolicy || getReturnSubtypeResolutionPolicy(index);
-  const indent = "  ".repeat(depth);
-  const normalizedTypeName = normalizeComparableToken(typeName);
-  if (visited.has(normalizedTypeName)) {
-    return [`${indent}${typeName} (recursive)`];
+  const normalizedSpecifier = normalizeStructuredTypeSpecifier(typeSpecifier);
+  if (!normalizedSpecifier) {
+    return [];
   }
-
-  const preferredQualifiedNames = getPreferredQualifiedNamesForType(typePreferencesByName, typeName);
+  const typeName = normalizedSpecifier.typeName;
+  const indent = "  ".repeat(depth);
+  const preferredQualifiedNames =
+    normalizedSpecifier.preferredQualifiedNames.length > 0
+      ? normalizedSpecifier.preferredQualifiedNames
+      : getPreferredQualifiedNamesForType(typePreferencesByName, typeName);
   const enumCandidates = index.enumsByName?.get(typeName) || [];
   if (enumCandidates.length > 0) {
     const selectedEnum = choosePreferredEnumDefinition(enumCandidates, {
@@ -7065,14 +7283,18 @@ function renderIndexedTypeTree(typeName, index, depth, maxDepth, maxFieldsPerTyp
   if (!selectedType) {
     return [`${indent}${typeName}`];
   }
+  const visitedKey = getStructuredTypeVisitedKey(typeName, selectedType, preferredQualifiedNames);
+  if (visited.has(visitedKey)) {
+    return [`${indent}${normalizedSpecifier.displayName} (recursive)`];
+  }
   const typeLabel =
     normalizedMode === "technical"
-      ? `${typeName} (${selectedType.isDataclass ? "dataclass" : "typed class"})`
-      : typeName;
+      ? `${normalizedSpecifier.displayName} (${selectedType.isDataclass ? "dataclass" : "typed class"})`
+      : normalizedSpecifier.displayName;
   const lines = [`${indent}${typeLabel}`];
 
   const nextVisited = new Set(visited);
-  nextVisited.add(normalizedTypeName);
+  nextVisited.add(visitedKey);
 
   const fields = selectedType.fields || [];
   const shownFields = fields.slice(0, maxFieldsPerType);
@@ -7102,7 +7324,10 @@ function renderIndexedTypeTree(typeName, index, depth, maxDepth, maxFieldsPerTyp
     for (const nestedTypeName of shownNestedTypes) {
       lines.push(
         ...renderIndexedTypeTree(
-          nestedTypeName,
+          {
+            typeName: nestedTypeName,
+            displayName: nestedTypeName
+          },
           index,
           depth + 1,
           maxDepth,
@@ -7122,26 +7347,32 @@ function renderIndexedTypeTree(typeName, index, depth, maxDepth, maxFieldsPerTyp
     lines.push(`${indent}  ... ${fields.length - shownFields.length} more fields`);
   }
 
-  const inheritedTypeNames = (selectedType.baseTypeNames || []).filter(
-    (baseTypeName) =>
-      normalizeComparableToken(baseTypeName) !== normalizedTypeName &&
-      (index.enumsByName?.has(baseTypeName) ||
-        (index.structuredTypesByName?.get(baseTypeName) || []).some((candidate) => candidate.isDataclass))
+  const inheritedTypeSpecifiers = resolveInheritedStructuredTypeSpecifiers(selectedType, index).filter(
+    (inheritedTypeSpecifier) =>
+      getStructuredTypeVisitedKey(
+        inheritedTypeSpecifier.typeName,
+        undefined,
+        inheritedTypeSpecifier.preferredQualifiedNames
+      ) !== visitedKey
   );
-  if (inheritedTypeNames.length > 0) {
+  if (inheritedTypeSpecifiers.length > 0) {
     if (depth >= maxDepth) {
       lines.push(
         normalizedMode === "technical"
-          ? `${indent}  [inherits] ${inheritedTypeNames.join(", ")}`
-          : `${indent}  inherits: ${inheritedTypeNames.join(", ")}`
+          ? `${indent}  [inherits] ${inheritedTypeSpecifiers
+              .map((inheritedTypeSpecifier) => inheritedTypeSpecifier.displayName)
+              .join(", ")}`
+          : `${indent}  inherits: ${inheritedTypeSpecifiers
+              .map((inheritedTypeSpecifier) => inheritedTypeSpecifier.displayName)
+              .join(", ")}`
       );
     } else {
       lines.push(normalizedMode === "technical" ? `${indent}  [inherits]` : `${indent}  inherits`);
-      const shownInheritedTypeNames = inheritedTypeNames.slice(0, 5);
-      for (const inheritedTypeName of shownInheritedTypeNames) {
+      const shownInheritedTypeSpecifiers = inheritedTypeSpecifiers.slice(0, 5);
+      for (const inheritedTypeSpecifier of shownInheritedTypeSpecifiers) {
         lines.push(
           ...renderIndexedTypeTree(
-            inheritedTypeName,
+            inheritedTypeSpecifier,
             index,
             depth + 1,
             maxDepth,
@@ -7155,9 +7386,9 @@ function renderIndexedTypeTree(typeName, index, depth, maxDepth, maxFieldsPerTyp
           )
         );
       }
-      if (inheritedTypeNames.length > shownInheritedTypeNames.length) {
+      if (inheritedTypeSpecifiers.length > shownInheritedTypeSpecifiers.length) {
         lines.push(
-          `${indent}  ... ${inheritedTypeNames.length - shownInheritedTypeNames.length} more inherited types`
+          `${indent}  ... ${inheritedTypeSpecifiers.length - shownInheritedTypeSpecifiers.length} more inherited types`
         );
       }
     }
@@ -7466,6 +7697,23 @@ function serializeReturnWorkerIndexSnapshot(index) {
         isDataclass: Boolean(candidate?.isDataclass),
         isIndexableWrapper: Boolean(candidate?.isIndexableWrapper),
         baseTypeNames: uniqueStrings((candidate?.baseTypeNames || []).map((value) => String(value || ""))),
+        baseTypeRefs: (Array.isArray(candidate?.baseTypeRefs) ? candidate.baseTypeRefs : [])
+          .map((baseTypeRef) => {
+            const typeName = String(baseTypeRef?.typeName || "").trim();
+            const preferredQualifiedNames = uniqueStrings(
+              (Array.isArray(baseTypeRef?.preferredQualifiedNames) ? baseTypeRef.preferredQualifiedNames : [])
+                .map((value) => String(value || "").trim())
+                .filter(Boolean)
+            );
+            if (!typeName) {
+              return undefined;
+            }
+            return {
+              typeName,
+              preferredQualifiedNames
+            };
+          })
+          .filter(Boolean),
         fields: (candidate?.fields || []).map((field) => ({
           name: String(field?.name || ""),
           annotation: String(field?.annotation || "")
