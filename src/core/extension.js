@@ -7783,7 +7783,7 @@ function dedupeFieldDescriptorsByName(fields) {
   const dedupedFields = [];
   const seenFieldsByName = new Map();
   for (const field of fields || []) {
-    const normalizedName = normalizeComparableToken(field.name);
+    const normalizedName = String(field?.name || "").trim();
     if (!normalizedName) {
       continue;
     }
@@ -9863,7 +9863,12 @@ function dedupeStructuredFields(fields) {
   const dedupedFields = [];
   const seenFields = new Set();
   for (const field of fields || []) {
-    const key = `${normalizeComparableToken(field.name)}:${normalizeComparableToken(field.annotation)}`;
+    const normalizedName = String(field?.name || "").trim();
+    const normalizedAnnotation = String(field?.annotation || "").trim().replace(/\s+/g, " ");
+    if (!normalizedName) {
+      continue;
+    }
+    const key = `${normalizedName}:${normalizedAnnotation}`;
     if (seenFields.has(key)) {
       continue;
     }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.23
+
+- Fixed return-member/property deduping so explicit Python property aliases remain visible instead of collapsing into the same normalized name.
+- Restored Partner-style aliases such as `businesspartnerId`, `arbeitnehmerNummer`, `sozialversicherungsNummer`, and `steuerId` in return hover, Return Explorer access lists, and `${var.}` member completions.
+
 ## 0.4.22
 
 - Changed `robotCompanion.returnMaxFieldsPerType` to default to `0` (unlimited), so larger return types like `Partner` no longer hide later properties just because earlier fields filled the first-level access list.

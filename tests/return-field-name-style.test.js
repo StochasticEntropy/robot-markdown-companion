@@ -215,6 +215,69 @@ class PropertyOnly:
   );
 }
 
+function runPythonPropertyAliasParsingTests() {
+  const source = `
+class Partner:
+    @property
+    def businesspartner_id(self) -> str:
+        return ""
+
+    @property
+    def businesspartnerId(self) -> str:
+        return ""
+
+    @property
+    def arbeitnehmer_nummer(self) -> str:
+        return ""
+
+    @property
+    def arbeitnehmerNummer(self) -> str:
+        return ""
+
+    @property
+    def arbeitnehmernummer(self) -> str:
+        return ""
+
+    @property
+    def sozialversicherungs_nummer(self) -> str:
+        return ""
+
+    @property
+    def sozialversicherungsNummer(self) -> str:
+        return ""
+
+    @property
+    def sozialversicherungsnummer(self) -> str:
+        return ""
+
+    @property
+    def steuer_id(self) -> str:
+        return ""
+
+    @property
+    def steuerId(self) -> str:
+        return ""
+`;
+  const parsedTypes = extensionTestApi.parseStructuredTypesFromPythonSource(source, "/tmp/property_alias_detection.py");
+  const partner = getOnlyStructuredType(parsedTypes, "Partner");
+  assert(partner);
+  assert.deepStrictEqual(
+    partner.properties.map((property) => property.name),
+    [
+      "businesspartner_id",
+      "businesspartnerId",
+      "arbeitnehmer_nummer",
+      "arbeitnehmerNummer",
+      "arbeitnehmernummer",
+      "sozialversicherungs_nummer",
+      "sozialversicherungsNummer",
+      "sozialversicherungsnummer",
+      "steuer_id",
+      "steuerId"
+    ]
+  );
+}
+
 function runReturnFieldNameStyleTests() {
   const index = createIndex([
     {
@@ -420,6 +483,40 @@ function runPropertyInclusionTests() {
     "snake_case"
   );
   assert.strictEqual(unlimitedAccess.firstLevel.length, 13);
+
+  const aliasIndex = createIndex([
+    {
+      name: "AliasPayload",
+      filePath: "/tmp/models/alias_payload.py",
+      modulePath: "tests.models.alias_payload",
+      qualifiedName: "tests.models.alias_payload.AliasPayload",
+      supportsCamelCaseAccess: false,
+      properties: [
+        { name: "businesspartner_id", annotation: "str" },
+        { name: "businesspartnerId", annotation: "str" }
+      ]
+    }
+  ]);
+  const aliasTemplate = workerTestApi.buildSimpleReturnAccessTemplate(["AliasPayload"], aliasIndex, {
+    maxDepth: 1,
+    maxFieldsPerType: 10,
+    includeProperties: true
+  });
+  const aliasCamelOnly = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${alias}",
+    aliasTemplate,
+    "camelcase"
+  );
+  assert(aliasCamelOnly.firstLevel.includes("${alias.businesspartner_id}"));
+  assert(aliasCamelOnly.firstLevel.includes("${alias.businesspartnerId}"));
+
+  const aliasSnakeOnly = workerTestApi.bindSimpleReturnAccessTemplate(
+    "${alias}",
+    aliasTemplate,
+    "snake_case"
+  );
+  assert(aliasSnakeOnly.firstLevel.includes("${alias.businesspartner_id}"));
+  assert(aliasSnakeOnly.firstLevel.includes("${alias.businesspartnerId}"));
 }
 
 function runCompletionMatchingTests() {
@@ -550,6 +647,7 @@ function runCompletionMatchingTests() {
 
 runPythonCamelCaseDetectionTests();
 runPythonPropertyParsingTests();
+runPythonPropertyAliasParsingTests();
 runReturnFieldNameStyleTests();
 runPropertyInclusionTests();
 runCompletionMatchingTests();
