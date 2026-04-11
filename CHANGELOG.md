@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.29
+
+- Changed inline-documentation preview rendering back to a single markdown flow, so numbered lists and bullet lists can continue consistently across multiple `#>` documentation blocks while still keeping Robot-source jump targets.
+
+## 0.4.28
+
+- Fixed clickable inline-documentation preview fragments so they jump back to the Robot source file line again instead of navigating inside the preview itself.
+
+## 0.4.27
+
+- Changed inline-documentation preview navigation so the rendered documentation fragments themselves are clickable, instead of showing separate "Jump to" links beside the content.
+
+## 0.4.26
+
+- Added inline Robot documentation support using `#>` markers inside Test Cases, Tasks, and Keywords, with merged rendering alongside classic `[Documentation]` blocks.
+- Documentation preview and hover now understand fragmented docs, and the preview viewer adds source-jump links for inline headings and inline doc blocks.
+
 ## 0.4.25
 
 - Removed the remaining second-level access truncation in hover and argument-value return previews, so second-level return paths now show in full by default instead of stopping after the first handful of entries.

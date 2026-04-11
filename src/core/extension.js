@@ -614,63 +614,7 @@ class RobotDocumentationService {
   parse(document) {
     const lines = document.getText().split(/\r?\n/);
     const { owners, ownerByLine } = buildOwnerScopes(lines);
-    const blocks = [];
-    let currentSection = null;
-
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-      const line = lines[lineIndex];
-      const trimmed = line.trim();
-
-      if (isSectionHeader(trimmed)) {
-        currentSection = getRelevantSection(trimmed);
-        continue;
-      }
-
-      if (!currentSection) {
-        continue;
-      }
-
-      const docHeader = parseDocumentationHeader(line);
-      if (!docHeader) {
-        continue;
-      }
-
-      const owner = ownerByLine[lineIndex];
-      const ownerName = owner ? owner.name : "Unknown Test/Keyword";
-      const markdownLines = [];
-      if (docHeader.inlineText.length > 0) {
-        markdownLines.push(docHeader.inlineText);
-      }
-
-      let endLine = lineIndex;
-      for (let nextLine = lineIndex + 1; nextLine < lines.length; nextLine += 1) {
-        const continuation = parseContinuationLine(lines[nextLine]);
-        if (!continuation.isContinuation) {
-          break;
-        }
-        markdownLines.push(continuation.text);
-        endLine = nextLine;
-      }
-
-      const markdown = markdownLines.join("\n");
-      const title = deriveTitle(ownerName, markdown);
-      const id = `${lineIndex}:${ownerName}`;
-
-      blocks.push({
-        id,
-        ownerName,
-        ownerId: owner ? owner.id : "",
-        ownerStartLine: owner ? owner.startLine : lineIndex,
-        section: currentSection,
-        title,
-        markdown,
-        startLine: lineIndex,
-        endLine,
-        range: new vscode.Range(lineIndex, 0, endLine, lines[endLine] ? lines[endLine].length : 0)
-      });
-
-      lineIndex = endLine;
-    }
+    const blocks = buildDocumentationBlocks(lines, owners, ownerByLine);
 
     const variableAssignments = parseVariableAssignments(lines, ownerByLine);
     const keywordCallAssignments = parseKeywordCallAssignments(lines, ownerByLine);
@@ -2590,13 +2534,16 @@ class RobotDocHoverProvider {
       return undefined;
     }
 
-    const block = parsed.blocks.find(
-      (candidate) => position.line >= candidate.startLine && position.line <= candidate.endLine
-    );
+    const block = parsed.blocks.find((candidate) => getContainingBlockSpan(candidate, position.line));
 
     if (!block) {
       return undefined;
     }
+
+    const containingSpan = getContainingBlockSpan(block, position.line) || {
+      startLine: block.startLine,
+      endLine: block.endLine
+    };
 
     const hoverLineLimit = getHoverLineLimit();
     const hoverSourceLines = block.markdown.split(/\r?\n/);
@@ -2632,7 +2579,14 @@ class RobotDocHoverProvider {
     const args = encodeURIComponent(JSON.stringify([document.uri.toString(), block.id]));
     markdown.appendMarkdown(`\n\n[Open full rendered preview](command:${CMD_OPEN_BLOCK_AT}?${args})`);
 
-    return new vscode.Hover(markdown, block.range);
+    const endLine = Math.max(containingSpan.startLine, containingSpan.endLine);
+    const range = new vscode.Range(
+      containingSpan.startLine,
+      0,
+      endLine,
+      document.lineAt(endLine).text.length
+    );
+    return new vscode.Hover(markdown, range);
   }
 }
 
@@ -3096,7 +3050,7 @@ class RobotDocPreviewViewProvider {
 
     const selectedBlock = getSelectedBlock(this._state);
     const renderedMarkdownHtml = selectedBlock
-      ? await renderMarkdownToHtml(formatMarkdownForDisplay(selectedBlock.markdown))
+      ? await renderDocumentationBlockHtml(this._state.documentUri, selectedBlock)
       : "<p class=\"muted\">No documentation block selected.</p>";
 
     if (!this._view || currentSequence !== this._renderSequence) {
@@ -3140,7 +3094,7 @@ class RobotDocPreviewViewProvider {
       ? `<div class=\"meta\">Owner: ${escapeHtml(selectedBlock.ownerName)} | Lines: ${
           selectedBlock.startLine + 1
         }-${selectedBlock.endLine + 1}</div>`
-      : "<div class=\"meta muted\">Move cursor into a [Documentation] block or use command palette.</div>";
+      : "<div class=\"meta muted\">Move cursor into documentation or inline #> docs, or use command palette.</div>";
 
     const message = this._state.infoMessage
       ? `<div class=\"notice\">${escapeHtml(this._state.infoMessage)}</div>`
@@ -3148,7 +3102,7 @@ class RobotDocPreviewViewProvider {
 
     const listContent = hasBlocks
       ? `<ul class=\"list\">${blockItems}</ul>`
-      : "<div class=\"muted\">No [Documentation] blocks found in Test Cases/Tasks/Keywords.</div>";
+      : "<div class=\"muted\">No documentation or inline #> docs found in Test Cases/Tasks/Keywords.</div>";
 
     const selectedTestcaseJumpCommand =
       selectedBlock && this._state.documentUri
@@ -3303,6 +3257,33 @@ class RobotDocPreviewViewProvider {
       background: var(--vscode-textCodeBlock-background);
       border-radius: 4px;
     }
+    .preview .doc-fragment {
+      margin-bottom: 1.2em;
+    }
+    .preview .doc-fragment:last-child {
+      margin-bottom: 0;
+    }
+    .preview .doc-clickable {
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background-color 120ms ease;
+    }
+    .preview .doc-clickable:hover {
+      background: color-mix(in srgb, var(--vscode-editor-background) 78%, var(--vscode-focusBorder));
+    }
+    .preview .doc-clickable:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+    .preview .doc-inline-heading {
+      margin-bottom: 0.4em;
+    }
+    .preview .doc-inline-chunk {
+      margin-bottom: 0.8em;
+    }
+    .preview .doc-inline-chunk:last-child {
+      margin-bottom: 0;
+    }
     .preview code {
       font-family: var(--vscode-editor-font-family);
     }
@@ -3357,6 +3338,140 @@ class RobotDocPreviewViewProvider {
 
         element.innerHTML = rebuilt.join('');
       }
+
+      const findFirstElementNode = (node) => {
+        if (!node) {
+          return null;
+        }
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          return node;
+        }
+        let child = node.firstChild;
+        while (child) {
+          const found = findFirstElementNode(child);
+          if (found) {
+            return found;
+          }
+          child = child.nextSibling;
+        }
+        return null;
+      };
+
+      const findNextElementAfterMarker = (markerNode) => {
+        let current = markerNode;
+        while (current && current !== previewRoot) {
+          let sibling = current.nextSibling;
+          while (sibling) {
+            const found = findFirstElementNode(sibling);
+            if (found) {
+              return found;
+            }
+            sibling = sibling.nextSibling;
+          }
+          current = current.parentNode;
+        }
+        return null;
+      };
+
+      const attachDocumentationSourceTargets = () => {
+        const walker = document.createTreeWalker(previewRoot, NodeFilter.SHOW_COMMENT);
+        const markers = [];
+        while (walker.nextNode()) {
+          markers.push(walker.currentNode);
+        }
+
+        for (const marker of markers) {
+          const rawValue = String(marker.nodeValue || '').trim();
+          if (!rawValue.startsWith('RDPDOC:')) {
+            continue;
+          }
+
+          let payload;
+          try {
+            payload = JSON.parse(decodeURIComponent(rawValue.slice('RDPDOC:'.length)));
+          } catch {
+            marker.remove();
+            continue;
+          }
+
+          const target = findNextElementAfterMarker(marker);
+          marker.remove();
+          if (!target || !payload?.commandUri) {
+            continue;
+          }
+
+          target.classList.add('doc-clickable');
+          target.setAttribute('data-source-command', String(payload.commandUri));
+          target.setAttribute('tabindex', '0');
+          target.setAttribute('role', 'link');
+          if (payload.label) {
+            target.setAttribute('title', String(payload.label));
+          }
+        }
+      };
+
+      attachDocumentationSourceTargets();
+
+      const openSourceTarget = (commandUri) => {
+        if (!commandUri) {
+          return;
+        }
+        const anchor = document.createElement('a');
+        anchor.href = commandUri;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      };
+
+      const shouldPreserveAnchorNavigation = (anchor) => {
+        if (!anchor) {
+          return false;
+        }
+
+        const rawHref = String(anchor.getAttribute('href') || anchor.getAttribute('data-href') || '').trim();
+        if (!rawHref) {
+          return false;
+        }
+
+        if (rawHref.startsWith('#')) {
+          return false;
+        }
+
+        return /^[a-z][a-z0-9+.-]*:/i.test(rawHref);
+      };
+
+      previewRoot.addEventListener('click', (event) => {
+        const clickable = event.target.closest('[data-source-command]');
+        if (!clickable || !previewRoot.contains(clickable)) {
+          return;
+        }
+
+        const interactiveAnchor = event.target.closest('a[href], a[data-href]');
+        if (interactiveAnchor && previewRoot.contains(interactiveAnchor)) {
+          if (shouldPreserveAnchorNavigation(interactiveAnchor)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        }
+
+        openSourceTarget(clickable.getAttribute('data-source-command'));
+      });
+
+      previewRoot.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return;
+        }
+
+        const clickable = event.target.closest('[data-source-command]');
+        if (!clickable || !previewRoot.contains(clickable)) {
+          return;
+        }
+
+        event.preventDefault();
+        openSourceTarget(clickable.getAttribute('data-source-command'));
+      });
     })();
   </script>
 </body>
@@ -3418,7 +3533,7 @@ class RobotDocPreviewController {
     const editor = vscode.window.activeTextEditor;
     if (!editor || !isRobotDocument(editor.document)) {
       this._previewProvider.update(
-        createEmptyPreviewState("Open a .robot file and move the cursor into a [Documentation] block.")
+        createEmptyPreviewState("Open a .robot file and move the cursor into documentation or inline #> docs.")
       );
       await this._focusPreviewView();
       return;
@@ -3623,7 +3738,7 @@ class RobotDocPreviewController {
       blocks: parsed.blocks,
       infoMessage:
         parsed.blocks.length === 0
-          ? "No [Documentation] blocks found in Test Cases/Tasks/Keywords sections."
+          ? "No documentation or inline #> docs found in Test Cases/Tasks/Keywords sections."
           : ""
     });
   }
@@ -5229,6 +5344,22 @@ function parseDocumentationHeader(line) {
   };
 }
 
+function parseInlineDocumentationLine(line) {
+  const trimmed = String(line || "").trimStart();
+  if (!trimmed.startsWith("#>")) {
+    return null;
+  }
+
+  let text = trimmed.slice(2);
+  if (text.startsWith(" ") || text.startsWith("\t")) {
+    text = text.slice(1);
+  }
+
+  return {
+    text
+  };
+}
+
 function parseContinuationLine(line) {
   const trimmed = line.trimStart();
   if (!trimmed.startsWith("...")) {
@@ -5270,6 +5401,196 @@ function stripRobotCellSeparator(textAfterPrefix) {
   return textAfterPrefix;
 }
 
+function isMarkdownHeadingLine(line) {
+  return /^\s{0,3}#{1,6}\s+\S/.test(String(line || ""));
+}
+
+function mergeDocumentationFragmentsToMarkdown(fragments) {
+  const safeFragments = Array.isArray(fragments) ? fragments : [];
+  const mergedLines = [];
+  let hasMeaningfulContent = false;
+
+  for (let index = 0; index < safeFragments.length; index += 1) {
+    const fragmentMarkdown = String(safeFragments[index]?.markdown || "");
+    const fragmentLines = fragmentMarkdown.split(/\r?\n/);
+    mergedLines.push(...fragmentLines);
+    if (fragmentLines.some((line) => String(line || "").trim().length > 0)) {
+      hasMeaningfulContent = true;
+    }
+  }
+
+  const mergedMarkdown = collapseMarkdownBlankLines(mergedLines.join("\n")).trim();
+  if (mergedMarkdown.length > 0 || hasMeaningfulContent) {
+    return mergedMarkdown;
+  }
+  return "";
+}
+
+function createDocumentationFragment(sourceKind, owner, startLine, endLine, markdownLines, options = {}) {
+  const safeMarkdownLines = Array.isArray(markdownLines) ? markdownLines.map((line) => String(line || "")) : [];
+  const safeStartLine = Math.max(0, Number(startLine) || 0);
+  const safeEndLine = Math.max(safeStartLine, Number(endLine) || safeStartLine);
+  const lineEntries =
+    sourceKind === "inline"
+      ? (Array.isArray(options.lineEntries) ? options.lineEntries : []).map((entry) => ({
+          text: String(entry?.text || ""),
+          sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
+          isHeading: Boolean(entry?.isHeading)
+        }))
+      : [];
+
+  return {
+    id: `${String(owner?.id || "owner")}:${sourceKind}:${safeStartLine}`,
+    sourceKind,
+    startLine: safeStartLine,
+    endLine: safeEndLine,
+    markdown: safeMarkdownLines.join("\n"),
+    lineEntries,
+    ownerId: String(owner?.id || ""),
+    ownerName: String(owner?.name || ""),
+    section: String(owner?.section || "")
+  };
+}
+
+function ensureDocumentationBlockBuilder(buildersByOwnerId, owner) {
+  const ownerId = String(owner?.id || "");
+  if (!ownerId) {
+    return undefined;
+  }
+
+  const existing = buildersByOwnerId.get(ownerId);
+  if (existing) {
+    return existing;
+  }
+
+  const created = {
+    owner,
+    fragments: []
+  };
+  buildersByOwnerId.set(ownerId, created);
+  return created;
+}
+
+function getLineLength(lines, line) {
+  const safeLine = Math.max(0, Number(line) || 0);
+  return String(lines?.[safeLine] || "").length;
+}
+
+function buildDocumentationBlocks(lines, owners, ownerByLine) {
+  const buildersByOwnerId = new Map();
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const owner = ownerByLine[lineIndex];
+    if (!owner) {
+      continue;
+    }
+
+    const docHeader = parseDocumentationHeader(lines[lineIndex]);
+    if (docHeader) {
+      const markdownLines = [];
+      if (docHeader.inlineText.length > 0) {
+        markdownLines.push(docHeader.inlineText);
+      }
+
+      let endLine = lineIndex;
+      for (let nextLine = lineIndex + 1; nextLine < lines.length; nextLine += 1) {
+        const continuation = parseContinuationLine(lines[nextLine]);
+        const nextOwner = ownerByLine[nextLine];
+        if (!continuation.isContinuation || !nextOwner || nextOwner.id !== owner.id) {
+          break;
+        }
+        markdownLines.push(continuation.text);
+        endLine = nextLine;
+      }
+
+      const builder = ensureDocumentationBlockBuilder(buildersByOwnerId, owner);
+      if (builder) {
+        builder.fragments.push(createDocumentationFragment("documentation", owner, lineIndex, endLine, markdownLines));
+      }
+      lineIndex = endLine;
+      continue;
+    }
+
+    const inlineDoc = parseInlineDocumentationLine(lines[lineIndex]);
+    if (!inlineDoc) {
+      continue;
+    }
+
+    const markdownLines = [inlineDoc.text];
+    const lineEntries = [
+      {
+        text: inlineDoc.text,
+        sourceLine: lineIndex,
+        isHeading: isMarkdownHeadingLine(inlineDoc.text)
+      }
+    ];
+
+    let endLine = lineIndex;
+    for (let nextLine = lineIndex + 1; nextLine < lines.length; nextLine += 1) {
+      const nextOwner = ownerByLine[nextLine];
+      if (!nextOwner || nextOwner.id !== owner.id) {
+        break;
+      }
+      const nextInlineDoc = parseInlineDocumentationLine(lines[nextLine]);
+      if (!nextInlineDoc) {
+        break;
+      }
+      markdownLines.push(nextInlineDoc.text);
+      lineEntries.push({
+        text: nextInlineDoc.text,
+        sourceLine: nextLine,
+        isHeading: isMarkdownHeadingLine(nextInlineDoc.text)
+      });
+      endLine = nextLine;
+    }
+
+    const builder = ensureDocumentationBlockBuilder(buildersByOwnerId, owner);
+    if (builder) {
+      builder.fragments.push(
+        createDocumentationFragment("inline", owner, lineIndex, endLine, markdownLines, {
+          lineEntries
+        })
+      );
+    }
+    lineIndex = endLine;
+  }
+
+  const blocks = [];
+  for (const owner of owners || []) {
+    const builder = buildersByOwnerId.get(owner.id);
+    if (!builder || !Array.isArray(builder.fragments) || builder.fragments.length === 0) {
+      continue;
+    }
+
+    const fragments = [...builder.fragments].sort((left, right) => Number(left.startLine) - Number(right.startLine));
+    const markdown = mergeDocumentationFragmentsToMarkdown(fragments);
+    const title = deriveTitle(owner.name, markdown);
+    const startLine = Math.min(...fragments.map((fragment) => Number(fragment.startLine) || owner.startLine));
+    const endLine = Math.max(...fragments.map((fragment) => Number(fragment.endLine) || owner.startLine));
+    const lineSpans = fragments.map((fragment) => ({
+      startLine: Math.max(0, Number(fragment.startLine) || 0),
+      endLine: Math.max(0, Number(fragment.endLine) || 0)
+    }));
+
+    blocks.push({
+      id: `${owner.id}:documentation`,
+      ownerName: owner.name,
+      ownerId: owner.id,
+      ownerStartLine: owner.startLine,
+      section: owner.section,
+      title,
+      markdown,
+      fragments,
+      lineSpans,
+      startLine,
+      endLine,
+      range: new vscode.Range(startLine, 0, endLine, getLineLength(lines, endLine))
+    });
+  }
+
+  return blocks;
+}
+
 function deriveTitle(ownerName, markdown) {
   const lines = markdown.split(/\r?\n/);
   for (const raw of lines) {
@@ -5284,6 +5605,13 @@ function deriveTitle(ownerName, markdown) {
         return heading;
       }
     }
+  }
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
 
     return line.length > 80 ? `${line.slice(0, 77)}...` : line;
   }
@@ -5291,12 +5619,56 @@ function deriveTitle(ownerName, markdown) {
   return ownerName;
 }
 
+function getBlockLineSpans(block) {
+  const spans = Array.isArray(block?.lineSpans) ? block.lineSpans : [];
+  if (spans.length > 0) {
+    return spans
+      .map((span) => ({
+        startLine: Math.max(0, Number(span?.startLine) || 0),
+        endLine: Math.max(0, Number(span?.endLine) || 0)
+      }))
+      .sort((left, right) => left.startLine - right.startLine);
+  }
+
+  return [
+    {
+      startLine: Math.max(0, Number(block?.startLine) || 0),
+      endLine: Math.max(0, Number(block?.endLine) || 0)
+    }
+  ];
+}
+
+function getContainingBlockSpan(block, line) {
+  const safeLine = Math.max(0, Number(line) || 0);
+  for (const span of getBlockLineSpans(block)) {
+    if (safeLine >= span.startLine && safeLine <= span.endLine) {
+      return span;
+    }
+  }
+  return undefined;
+}
+
+function getDistanceToBlock(block, line) {
+  const safeLine = Math.max(0, Number(line) || 0);
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const span of getBlockLineSpans(block)) {
+    if (safeLine >= span.startLine && safeLine <= span.endLine) {
+      return 0;
+    }
+    const distance = safeLine < span.startLine ? span.startLine - safeLine : safeLine - span.endLine;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+    }
+  }
+  return bestDistance;
+}
+
 function findNearestBlock(blocks, line) {
   if (!blocks || blocks.length === 0) {
     return undefined;
   }
 
-  const containing = blocks.find((block) => line >= block.startLine && line <= block.endLine);
+  const containing = blocks.find((block) => getContainingBlockSpan(block, line));
   if (containing) {
     return containing;
   }
@@ -5305,7 +5677,7 @@ function findNearestBlock(blocks, line) {
   let bestDistance = Number.POSITIVE_INFINITY;
 
   for (const block of blocks) {
-    const distance = line < block.startLine ? block.startLine - line : line - block.endLine;
+    const distance = getDistanceToBlock(block, line);
     if (distance < bestDistance) {
       bestDistance = distance;
       nearest = block;
@@ -11367,6 +11739,147 @@ async function renderMarkdownToHtml(markdown) {
   return `<pre>${escapeHtml(markdown || "")}</pre>`;
 }
 
+function isMarkdownListItemLine(line) {
+  return /^\s{0,3}(?:[-*+]|\d+[.)])\s+\S/.test(String(line || ""));
+}
+
+function buildDocumentationSourceMarker(commandUri, label) {
+  if (!commandUri) {
+    return "";
+  }
+  return `<!--RDPDOC:${encodeURIComponent(JSON.stringify({ commandUri, label }))}-->`;
+}
+
+function createDocumentationRenderItem(kind, markdownLines = [], options = {}) {
+  return {
+    kind,
+    markdownLines: Array.isArray(markdownLines) ? markdownLines.map((line) => String(line || "")) : [],
+    commandUri: String(options.commandUri || ""),
+    label: String(options.label || "")
+  };
+}
+
+function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
+  const sourceKind = String(fragment?.sourceKind || "documentation").trim().toLowerCase();
+  if (sourceKind !== "inline") {
+    const startLine = Math.max(0, Number(fragment?.startLine) || 0);
+    return [
+      createDocumentationRenderItem("chunk", String(fragment?.markdown || "").split(/\r?\n/), {
+        commandUri: buildOpenLocationCommandUri(documentUri, startLine),
+        label: `Open documentation line ${startLine + 1}`
+      })
+    ];
+  }
+
+  const fragmentStartLine = Math.max(0, Number(fragment?.startLine) || 0);
+  const lineEntries =
+    Array.isArray(fragment?.lineEntries) && fragment.lineEntries.length > 0
+      ? fragment.lineEntries
+      : String(fragment?.markdown || "")
+          .split(/\r?\n/)
+          .map((text, index) => ({
+            text,
+            sourceLine: fragmentStartLine + index,
+            isHeading: isMarkdownHeadingLine(text)
+          }));
+
+  const items = [];
+  let paragraphLines = [];
+  let paragraphStartLine = fragmentStartLine;
+
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) {
+      return;
+    }
+    items.push(
+      createDocumentationRenderItem("chunk", paragraphLines, {
+        commandUri: buildOpenLocationCommandUri(documentUri, paragraphStartLine),
+        label: `Open inline block line ${paragraphStartLine + 1}`
+      })
+    );
+    paragraphLines = [];
+  };
+
+  for (const entry of lineEntries) {
+    const text = String(entry?.text || "");
+    const sourceLine = Math.max(0, Number(entry?.sourceLine) || fragmentStartLine);
+    const isHeading = Boolean(entry?.isHeading) || isMarkdownHeadingLine(text);
+    const isListItem = isMarkdownListItemLine(text);
+
+    if (text.trim().length === 0) {
+      flushParagraph();
+      items.push(createDocumentationRenderItem("blank", [""]));
+      continue;
+    }
+
+    if (isHeading || isListItem) {
+      flushParagraph();
+      items.push(
+        createDocumentationRenderItem("chunk", [text], {
+          commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+          label: isHeading ? `Open heading line ${sourceLine + 1}` : `Open list item line ${sourceLine + 1}`
+        })
+      );
+      continue;
+    }
+
+    if (paragraphLines.length === 0) {
+      paragraphStartLine = sourceLine;
+    }
+    paragraphLines.push(text);
+  }
+
+  flushParagraph();
+  return items;
+}
+
+function buildDocumentationRenderMarkdown(documentUri, block) {
+  const fragments =
+    Array.isArray(block?.fragments) && block.fragments.length > 0
+      ? block.fragments
+      : [
+          {
+            sourceKind: "documentation",
+            startLine: Number(block?.startLine) || 0,
+            markdown: String(block?.markdown || "")
+          }
+        ];
+
+  const markdownLines = [];
+  let previousWasBlank = false;
+
+  for (const fragment of fragments) {
+    const items = buildDocumentationRenderItemsForFragment(documentUri, fragment);
+    for (const item of items) {
+      if (item.kind === "blank") {
+        if (!previousWasBlank) {
+          markdownLines.push("");
+          previousWasBlank = true;
+        }
+        continue;
+      }
+
+      const marker = buildDocumentationSourceMarker(item.commandUri, item.label);
+      if (marker) {
+        markdownLines.push(marker);
+      }
+      markdownLines.push(...item.markdownLines);
+      previousWasBlank = item.markdownLines.length > 0 && item.markdownLines[item.markdownLines.length - 1].trim().length === 0;
+    }
+  }
+
+  while (markdownLines.length > 0 && markdownLines[markdownLines.length - 1] === "") {
+    markdownLines.pop();
+  }
+
+  return markdownLines.join("\n");
+}
+
+async function renderDocumentationBlockHtml(documentUri, block) {
+  const annotatedMarkdown = buildDocumentationRenderMarkdown(documentUri, block);
+  return renderMarkdownToHtml(formatMarkdownForDisplay(annotatedMarkdown));
+}
+
 function styleEnumDetailsForPanel(renderedHtml) {
   const source = String(renderedHtml || "");
   if (!source) {
@@ -11812,10 +12325,19 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function escapeHtmlAttribute(value) {
+  return escapeHtml(value);
+}
+
 module.exports = {
   activate,
   deactivate,
   __test__: {
+    RobotDocumentationService,
+    findNearestBlock,
+    getContainingBlockSpan,
+    renderDocumentationBlockHtml,
+    buildOpenLocationCommandUri,
     parseStructuredTypesFromPythonSource,
     finalizeStructuredTypeCamelCaseAccess,
     buildEnumPreviewMarkdown
