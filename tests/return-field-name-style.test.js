@@ -830,6 +830,43 @@ Case PlainClassic
     [Documentation]    line one
     ...    line two
     Log    classic action
+Case MarkerDepthHierarchy
+    #> - first level
+    #>> - child level
+    Log    nested body
+    
+    #> - next first level
+    Log    sibling body
+Case MarkerDepthHierarchyNoGap
+    #> - first level
+    \${LeistungsfallId}=    BAVL LeistungsfallId zur Vertragsnummer Ermitteln
+    ...    vertragsnummer=\${AD.VertragNr}
+    #>> - child level
+    BAVL KVDR_MELDUNG_ZS Eintrag Prüfen - DatenbankAufruf
+    ...    leistungsfallId=\${LeistungsfallId}
+    #> - next first level
+    BAVL ZMV_CONNECT_VERSORGUNGSBEZUG Prüfen - DatenbankAufruf
+    ...    kvdrMeldungZahlstelleId=\${None}
+Case LastHeadingWithNestedChild
+    #> ### Testablauf
+    Log    one
+    #> ### Letzte Section
+    #>> - child
+    Log    two
+    Log    three
+Case HeadingWithPlainPeersAndNestedChild
+    #> ## Testablauf
+    Log    heading intro
+    #> ### tetes
+    Log    heading detail
+    #> - first level
+    Log    first body
+    #>> - child level
+    Log    child body
+    #> - next first level
+    Log    next body
+    #> - Prüfen der DPRS-Auftragsdatei
+    Log    last body
 Case NoFold
     # comment only
     Log    noop
@@ -853,26 +890,86 @@ Case NoFold
     ]
   );
 
+  const markerDepthEntries = parsed.blocks.find((block) => block.ownerName === "Case MarkerDepthHierarchy").fragments[0]
+    .lineEntries;
+  assert.deepStrictEqual(
+    markerDepthEntries.map((entry) => ({
+      sourceLine: entry.sourceLine,
+      nestingLevel: entry.nestingLevel
+    })),
+    [
+      { sourceLine: 40, nestingLevel: 0 },
+      { sourceLine: 41, nestingLevel: 1 }
+    ]
+  );
+
   const foldingRanges = extensionTestApi.buildDocumentationFoldingRanges(parsed.blocks);
   assert.deepStrictEqual(foldingRanges, [
     { startLine: 2, endLine: 7 },
-    { startLine: 3, endLine: 4 },
-    { startLine: 5, endLine: 7 },
-    { startLine: 6, endLine: 7 },
+    { startLine: 5, endLine: 6 },
     { startLine: 8, endLine: 9 },
     { startLine: 11, endLine: 13 },
     { startLine: 15, endLine: 18 },
     { startLine: 17, endLine: 18 },
     { startLine: 19, endLine: 21 },
-    { startLine: 20, endLine: 21 },
     { startLine: 23, endLine: 27 },
-    { startLine: 25, endLine: 27 },
-    { startLine: 26, endLine: 27 },
+    { startLine: 25, endLine: 26 },
     { startLine: 29, endLine: 32 },
     { startLine: 31, endLine: 32 },
     { startLine: 33, endLine: 34 },
-    { startLine: 36, endLine: 38 }
+    { startLine: 36, endLine: 38 },
+    { startLine: 40, endLine: 43 },
+    { startLine: 41, endLine: 42 },
+    { startLine: 44, endLine: 45 },
+    { startLine: 47, endLine: 52 },
+    { startLine: 50, endLine: 51 },
+    { startLine: 53, endLine: 55 },
+    { startLine: 57, endLine: 58 },
+    { startLine: 59, endLine: 62 },
+    { startLine: 60, endLine: 61 },
+    { startLine: 64, endLine: 75 },
+    { startLine: 66, endLine: 74 },
+    { startLine: 68, endLine: 71 },
+    { startLine: 70, endLine: 71 },
+    { startLine: 72, endLine: 73 },
+    { startLine: 74, endLine: 75 }
   ]);
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 47 && range.endLine === 52),
+    "top-level inline fold should remain available even when a nested child shares the section"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 50 && range.endLine === 51),
+    "nested #>> child should fold independently before the next top-level peer"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 59 && range.endLine === 62),
+    "last heading should fold to the end of the owner"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 60 && range.endLine === 61),
+    "nested child under the last heading should still get its own fold"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 68 && range.endLine === 71),
+    "first-level plain peers under a heading should still get their own fold markers"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 70 && range.endLine === 71),
+    "nested children should survive normalization even when they close on the same line as their parent"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 31 && range.endLine === 32),
+    "single-body first-level markers under a heading should still keep a fold marker"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 74 && range.endLine === 75),
+    "the final first-level peer in a heading-owned section should still fold to the owner end"
+  );
+  assert.ok(
+    foldingRanges.some((range) => range.startLine === 66 && range.endLine === 74),
+    "the last nested heading should still keep a visible fold marker even when it ends near the owner boundary"
+  );
 }
 
 async function main() {

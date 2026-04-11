@@ -97,13 +97,14 @@ const RETURN_SUBTYPE_RESOLUTION_MODES = new Set(["always", "never", "include", "
 const RETURN_FIELD_NAME_STYLES = new Set(["camelcase", "snake_case", "both"]);
 const UNLIMITED_RETURN_FIELDS_PER_TYPE = Number.MAX_SAFE_INTEGER;
 const ENUM_COMPLETION_DISPLAY_MODES = new Set(["name", "value", "both"]);
-const ROBOT_COMPANION_LOG_LEVELS = new Set(["off", "error", "warn", "info", "debug"]);
+const ROBOT_COMPANION_LOG_LEVELS = new Set(["off", "error", "warn", "info", "debug", "trace"]);
 const ROBOT_COMPANION_LOG_LEVEL_RANKS = new Map([
   ["off", -1],
   ["error", 0],
   ["warn", 1],
   ["info", 2],
-  ["debug", 3]
+  ["debug", 3],
+  ["trace", 4]
 ]);
 const BUILTIN_INDEXABLE_RETURN_CONTAINERS = new Set([
   "list",
@@ -208,6 +209,14 @@ function logRobotCompanionInfo(message, details = undefined) {
   appendRobotCompanionOutput("info", message, details);
 }
 
+function logRobotCompanionDebug(message, details = undefined) {
+  appendRobotCompanionOutput("debug", message, details);
+}
+
+function logRobotCompanionTrace(message, details = undefined) {
+  appendRobotCompanionOutput("trace", message, details);
+}
+
 function logRobotCompanionWarning(message, details = undefined) {
   appendRobotCompanionOutput("warn", message, details);
   if (details instanceof Error) {
@@ -245,7 +254,7 @@ function shouldTraceReturnResolution(rootTypeNames, simpleAccess, technicalStruc
       .map((value) => normalizeComparableToken(value))
       .filter(Boolean)
   );
-  if (getRobotCompanionLogLevel() === "debug") {
+  if (["debug", "trace"].includes(getRobotCompanionLogLevel())) {
     return true;
   }
   if (normalizedTypeNames.length === 0) {
@@ -2385,7 +2394,17 @@ class RobotDocFoldingRangeProvider {
     }
 
     const parsed = this._parser.getParsed(document);
-    return buildDocumentationFoldingRanges(parsed.blocks).map(
+    const foldingTrace = buildDocumentationFoldingTrace(parsed.blocks);
+    if (getRobotCompanionLogLevel() === "trace") {
+      logRobotCompanionTrace("Documentation folding trace", {
+        documentUri: document.uri?.toString?.() || "",
+        lineCount: Number(document.lineCount) || 0,
+        blockCount: Array.isArray(parsed.blocks) ? parsed.blocks.length : 0,
+        blocks: foldingTrace.blocks,
+        ranges: foldingTrace.ranges
+      });
+    }
+    return foldingTrace.ranges.map(
       (range) => new vscode.FoldingRange(range.startLine, range.endLine, vscode.FoldingRangeKind.Region)
     );
   }
@@ -5501,7 +5520,8 @@ function createDocumentationFragment(sourceKind, owner, startLine, endLine, mark
       text,
       sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
       isHeading: headingLevel > 0 || Boolean(entry?.isHeading),
-      headingLevel
+      headingLevel,
+      nestingLevel: Math.max(0, Number(entry?.nestingLevel) || 0)
     };
   });
 
@@ -5561,7 +5581,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
           text: docHeader.inlineText,
           sourceLine: lineIndex,
           isHeading: isMarkdownHeadingLine(docHeader.inlineText),
-          headingLevel: getMarkdownHeadingLevel(docHeader.inlineText)
+          headingLevel: getMarkdownHeadingLevel(docHeader.inlineText),
+          nestingLevel: 0
         });
       }
 
@@ -5577,7 +5598,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
           text: continuation.text,
           sourceLine: nextLine,
           isHeading: isMarkdownHeadingLine(continuation.text),
-          headingLevel: getMarkdownHeadingLevel(continuation.text)
+          headingLevel: getMarkdownHeadingLevel(continuation.text),
+          nestingLevel: 0
         });
         endLine = nextLine;
       }
@@ -5605,7 +5627,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
         text: inlineDoc.text,
         sourceLine: lineIndex,
         isHeading: isMarkdownHeadingLine(inlineDoc.text),
-        headingLevel: getMarkdownHeadingLevel(inlineDoc.text)
+        headingLevel: getMarkdownHeadingLevel(inlineDoc.text),
+        nestingLevel: inlineDoc.nestingLevel
       }
     ];
 
@@ -5624,7 +5647,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
         text: nextInlineDoc.text,
         sourceLine: nextLine,
         isHeading: isMarkdownHeadingLine(nextInlineDoc.text),
-        headingLevel: getMarkdownHeadingLevel(nextInlineDoc.text)
+        headingLevel: getMarkdownHeadingLevel(nextInlineDoc.text),
+        nestingLevel: nextInlineDoc.nestingLevel
       });
       endLine = nextLine;
     }
@@ -5744,7 +5768,8 @@ function getDocumentationFragmentLineEntries(fragment) {
         text,
         sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
         isHeading: headingLevel > 0 || Boolean(entry?.isHeading),
-        headingLevel
+        headingLevel,
+        nestingLevel: Math.max(0, Number(entry?.nestingLevel) || 0)
       };
     })
     .sort((left, right) => left.sourceLine - right.sourceLine);
@@ -5779,7 +5804,11 @@ function getContiguousDocumentationFragmentGroups(fragments) {
   return groups;
 }
 
-function getDocumentationSectionMarkers(block) {
+function isMarkdownListItemLine(line) {
+  return /^\s{0,3}(?:[-+*]|\d+[.)])\s+\S/.test(String(line || ""));
+}
+
+function getDocumentationFoldingCandidates(block) {
   const fragments = (Array.isArray(block?.fragments) ? block.fragments : [])
     .map((fragment) => ({
       ...fragment,
@@ -5787,46 +5816,109 @@ function getDocumentationSectionMarkers(block) {
     }))
     .sort((left, right) => left.startLine - right.startLine);
 
-  const markers = [];
-  for (const fragment of fragments) {
-    const entries = getDocumentationFragmentLineEntries(fragment);
-    let previousWasPlainText = false;
+  const candidates = [];
 
-    for (const entry of entries) {
+  for (const fragment of fragments) {
+    const sourceKind = String(fragment?.sourceKind || "");
+    const entries = getDocumentationFragmentLineEntries(fragment);
+    const hasHeading = entries.some((entry) => entry.headingLevel > 0);
+    let fragmentFallbackAdded = false;
+
+    for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+      const entry = entries[entryIndex];
       if (entry.text.trim().length === 0) {
-        previousWasPlainText = false;
         continue;
       }
 
+      const markerDepth = Math.max(0, Number(entry.nestingLevel) || 0);
       if (entry.headingLevel > 0) {
-        markers.push({
+        candidates.push({
           kind: "heading",
+          sourceKind,
           startLine: entry.sourceLine,
+          markerDepth,
           headingLevel: entry.headingLevel
         });
-        previousWasPlainText = false;
         continue;
       }
 
-      if (!previousWasPlainText) {
-        markers.push({
-          kind: "fragment",
+      if (sourceKind === "documentation") {
+        if (hasHeading || fragmentFallbackAdded) {
+          continue;
+        }
+        candidates.push({
+          kind: "plain",
+          sourceKind,
           startLine: entry.sourceLine,
+          markerDepth: 0,
           headingLevel: 0
         });
+        fragmentFallbackAdded = true;
+        continue;
       }
-      previousWasPlainText = true;
+
+      const looksStructural = isMarkdownListItemLine(entry.text);
+      if (!looksStructural && (hasHeading || fragmentFallbackAdded)) {
+        continue;
+      }
+      candidates.push({
+        kind: "plain",
+        sourceKind,
+        startLine: entry.sourceLine,
+        markerDepth,
+        headingLevel: 0
+      });
+      if (!looksStructural) {
+        fragmentFallbackAdded = true;
+      }
     }
   }
 
-  return markers.sort((left, right) => {
+  const ownerEndLine = Math.max(
+    0,
+    Number(block?.ownerEndLine) || 0,
+    Number(block?.endLine) || 0
+  );
+  const sortedCandidates = candidates.sort((left, right) => {
     if (left.startLine !== right.startLine) {
       return left.startLine - right.startLine;
     }
+    if (left.markerDepth !== right.markerDepth) {
+      return left.markerDepth - right.markerDepth;
+    }
     if (left.kind !== right.kind) {
-      return left.kind === "fragment" ? -1 : 1;
+      return left.kind === "heading" ? -1 : 1;
     }
     return left.headingLevel - right.headingLevel;
+  });
+
+  return sortedCandidates.map((candidate, index) => {
+    let endLine = ownerEndLine;
+    for (let nextIndex = index + 1; nextIndex < sortedCandidates.length; nextIndex += 1) {
+      const nextCandidate = sortedCandidates[nextIndex];
+      if (candidate.kind === "heading") {
+        const isShallowerHeading = nextCandidate.kind === "heading" && nextCandidate.markerDepth < candidate.markerDepth;
+        const isPeerOrHigherHeading =
+          nextCandidate.kind === "heading" &&
+          nextCandidate.markerDepth === candidate.markerDepth &&
+          nextCandidate.headingLevel <= candidate.headingLevel;
+        if (isShallowerHeading || isPeerOrHigherHeading) {
+          endLine = nextCandidate.startLine - 1;
+          break;
+        }
+        continue;
+      }
+
+      if (nextCandidate.markerDepth <= candidate.markerDepth) {
+        endLine = nextCandidate.startLine - 1;
+        break;
+      }
+    }
+
+    return {
+      ...candidate,
+      endLine
+    };
   });
 }
 
@@ -5849,43 +5941,125 @@ function pushDocumentationFoldingRange(ranges, seenKeys, startLine, endLine) {
   });
 }
 
-function buildDocumentationFoldingRanges(blocks) {
-  const ranges = [];
-  const seenKeys = new Set();
+function normalizeDocumentationFoldingCandidates(candidates) {
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      ...candidate,
+      startLine: Math.max(0, Number(candidate?.startLine) || 0),
+      endLine: Math.max(0, Number(candidate?.endLine) || 0)
+    }))
+    .sort((left, right) => {
+      if (left.startLine !== right.startLine) {
+        return left.startLine - right.startLine;
+      }
+      return right.endLine - left.endLine;
+    });
 
-  for (const block of Array.isArray(blocks) ? blocks : []) {
-    const markers = getDocumentationSectionMarkers(block);
-    const ownerEndLine = Math.max(
-      Math.max(0, Number(block?.ownerEndLine) || 0),
-      Math.max(0, Number(block?.endLine) || 0)
-    );
+  let changed = true;
+  while (changed) {
+    changed = false;
 
-    for (let markerIndex = 0; markerIndex < markers.length; markerIndex += 1) {
-      const currentMarker = markers[markerIndex];
-      let endLine = ownerEndLine;
+    for (let index = 0; index < normalized.length; index += 1) {
+      const current = normalized[index];
+      let nearestParent = null;
 
-      for (let nextIndex = markerIndex + 1; nextIndex < markers.length; nextIndex += 1) {
-        const candidate = markers[nextIndex];
-        if (currentMarker.kind !== "heading") {
-          endLine = candidate.startLine - 1;
-          break;
+      for (let parentIndex = 0; parentIndex < normalized.length; parentIndex += 1) {
+        if (parentIndex === index) {
+          continue;
         }
-        if (candidate.kind === "heading" && candidate.headingLevel <= currentMarker.headingLevel) {
-          endLine = candidate.startLine - 1;
-          break;
+        const candidateParent = normalized[parentIndex];
+        if (candidateParent.startLine >= current.startLine || candidateParent.endLine < current.endLine) {
+          continue;
+        }
+        if (!nearestParent) {
+          nearestParent = candidateParent;
+          continue;
+        }
+        const candidateSpan = candidateParent.endLine - candidateParent.startLine;
+        const nearestSpan = nearestParent.endLine - nearestParent.startLine;
+        if (candidateSpan < nearestSpan) {
+          nearestParent = candidateParent;
         }
       }
 
-      pushDocumentationFoldingRange(ranges, seenKeys, currentMarker.startLine, endLine);
+      if (!nearestParent || nearestParent.endLine !== current.endLine) {
+        continue;
+      }
+
+      const adjustedEnd = current.endLine - 1;
+      if (adjustedEnd <= current.startLine) {
+        continue;
+      }
+
+      current.endLine = adjustedEnd;
+      changed = true;
     }
   }
 
-  return ranges.sort((left, right) => {
-    if (left.startLine !== right.startLine) {
-      return left.startLine - right.startLine;
+  return normalized.filter((candidate) => !candidate.skip);
+}
+
+function buildDocumentationFoldingTrace(blocks) {
+  const ranges = [];
+  const seenKeys = new Set();
+  const blockTraces = [];
+
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const rawCandidates = getDocumentationFoldingCandidates(block);
+    const normalizedCandidates = normalizeDocumentationFoldingCandidates(rawCandidates);
+
+    for (const candidate of normalizedCandidates) {
+      pushDocumentationFoldingRange(ranges, seenKeys, candidate.startLine, candidate.endLine);
     }
-    return left.endLine - right.endLine;
-  });
+
+    blockTraces.push({
+      ownerName: String(block?.ownerName || ""),
+      ownerId: String(block?.ownerId || ""),
+      ownerStartLine: Math.max(0, Number(block?.ownerStartLine) || 0),
+      ownerEndLine: Math.max(0, Number(block?.ownerEndLine) || 0),
+      fragments: (Array.isArray(block?.fragments) ? block.fragments : []).map((fragment) => ({
+        sourceKind: String(fragment?.sourceKind || ""),
+        startLine: Math.max(0, Number(fragment?.startLine) || 0),
+        endLine: Math.max(0, Number(fragment?.endLine) || 0),
+        lineEntries: getDocumentationFragmentLineEntries(fragment).map((entry) => ({
+          sourceLine: entry.sourceLine,
+          headingLevel: entry.headingLevel,
+          nestingLevel: entry.nestingLevel,
+          text: entry.text
+        }))
+      })),
+      rawCandidates: rawCandidates.map((candidate) => ({
+        kind: candidate.kind,
+        sourceKind: candidate.sourceKind,
+        startLine: candidate.startLine,
+        endLine: candidate.endLine,
+        markerDepth: candidate.markerDepth,
+        headingLevel: candidate.headingLevel
+      })),
+      normalizedCandidates: normalizedCandidates.map((candidate) => ({
+        kind: candidate.kind,
+        sourceKind: candidate.sourceKind,
+        startLine: candidate.startLine,
+        endLine: candidate.endLine,
+        markerDepth: candidate.markerDepth,
+        headingLevel: candidate.headingLevel
+      }))
+    });
+  }
+
+  return {
+    ranges: ranges.sort((left, right) => {
+      if (left.startLine !== right.startLine) {
+        return left.startLine - right.startLine;
+      }
+      return left.endLine - right.endLine;
+    }),
+    blocks: blockTraces
+  };
+}
+
+function buildDocumentationFoldingRanges(blocks) {
+  return buildDocumentationFoldingTrace(blocks).ranges;
 }
 
 function getContainingBlockSpan(block, line) {

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.45
+
+- Normalized nested folds by trimming the inner same-end range instead of the parent, so the last nested heading and the last `#>` peer still get visible fold markers near the end of a testcase or keyword.
+
+## 0.4.44
+
+- Preserved same-end nested inline folds instead of dropping them, so first-level `#>` peers inside headings keep their gutter markers and nested `#>>` children still collapse correctly when both close on the same later sibling.
+
+## 0.4.43
+
+- Added a dedicated `trace` log level and routed documentation folding diagnostics there, so real-file folding traces can be captured without turning normal `debug` logging into noise.
+
+## 0.4.42
+
+- Fixed inline folding edge cases for real Robot files with no-gap nested markers, so top-level `#>` sections and last peer headings keep their own gutter fold markers while nested `#>>` children still collapse independently.
+
+## 0.4.41
+
+- Refined hierarchical inline folding so top-level `#>` sections keep their own gutter markers alongside deeper `#>>` children by avoiding same-end nested fold ranges when VS Code would otherwise suppress the parent marker.
+
+## 0.4.40
+
+- Reworked inline documentation folding to respect `#>` / `#>>` / `#>>>` hierarchy, so peer `#>` sections fold to the next same-depth peer while nested child markers keep their own collapse ranges.
+
 ## 0.4.39
 
 - Fixed documentation-driven folding so the last heading in a testcase/keyword also folds to the end of the owner block, while plain `#>` lines inside that section keep their own child collapse ranges.
