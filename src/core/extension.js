@@ -3268,6 +3268,11 @@ class RobotDocPreviewViewProvider {
       border-radius: 4px;
       transition: background-color 120ms ease;
     }
+    .preview .doc-clickable-surface-li {
+      display: inline;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
     .preview .doc-clickable:hover {
       background: color-mix(in srgb, var(--vscode-editor-background) 78%, var(--vscode-focusBorder));
     }
@@ -3339,73 +3344,99 @@ class RobotDocPreviewViewProvider {
         element.innerHTML = rebuilt.join('');
       }
 
-      const findFirstElementNode = (node) => {
-        if (!node) {
-          return null;
-        }
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          return node;
-        }
-        let child = node.firstChild;
-        while (child) {
-          const found = findFirstElementNode(child);
-          if (found) {
-            return found;
-          }
-          child = child.nextSibling;
-        }
-        return null;
-      };
-
-      const findNextElementAfterMarker = (markerNode) => {
-        let current = markerNode;
-        while (current && current !== previewRoot) {
-          let sibling = current.nextSibling;
-          while (sibling) {
-            const found = findFirstElementNode(sibling);
-            if (found) {
-              return found;
-            }
-            sibling = sibling.nextSibling;
-          }
-          current = current.parentNode;
-        }
-        return null;
-      };
-
       const attachDocumentationSourceTargets = () => {
-        const walker = document.createTreeWalker(previewRoot, NodeFilter.SHOW_COMMENT);
-        const markers = [];
-        while (walker.nextNode()) {
-          markers.push(walker.currentNode);
-        }
+        const blockSelector = 'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table';
+        const wrapperSelector = 'div, section, article, main, body, ol, ul';
 
-        for (const marker of markers) {
-          const rawValue = String(marker.nodeValue || '').trim();
-          if (!rawValue.startsWith('RDPDOC:')) {
+        const collectTargetableBlocks = (container) => {
+          if (!container || !(container instanceof HTMLElement)) {
+            return [];
+          }
+
+          const blocks = [];
+          for (const child of container.children) {
+            if (!(child instanceof HTMLElement)) {
+              continue;
+            }
+
+            if (child.matches(blockSelector)) {
+              blocks.push(child);
+            }
+
+            // Some block elements such as <li> can legitimately contain nested
+            // lists. We keep parent-first ordering, but still descend so deeper
+            // items remain independently clickable.
+            if (child.matches(wrapperSelector) || child.matches(blockSelector)) {
+              blocks.push(...collectTargetableBlocks(child));
+            }
+          }
+          return blocks;
+        };
+
+        const ensureListItemClickableSurface = (listItem) => {
+          if (!(listItem instanceof HTMLLIElement)) {
+            return listItem;
+          }
+
+          for (const child of listItem.children) {
+            if (child instanceof HTMLElement && child.classList.contains('doc-clickable-surface-li')) {
+              return child;
+            }
+          }
+
+          const surface = document.createElement('span');
+          surface.className = 'doc-clickable-surface-li';
+          const nodesToWrap = [];
+
+          for (const node of Array.from(listItem.childNodes)) {
+            if (node instanceof HTMLElement && (node.tagName === 'UL' || node.tagName === 'OL')) {
+              break;
+            }
+            nodesToWrap.push(node);
+          }
+
+          if (nodesToWrap.length === 0) {
+            return listItem;
+          }
+
+          for (const node of nodesToWrap) {
+            surface.appendChild(node);
+          }
+
+          listItem.insertBefore(surface, listItem.firstChild);
+          return surface;
+        };
+
+        const flows = previewRoot.querySelectorAll('[data-doc-render-targets]');
+        for (const flow of flows) {
+          const rawTargets = String(flow.getAttribute('data-doc-render-targets') || '').trim();
+          if (!rawTargets) {
             continue;
           }
 
-          let payload;
+          let targets;
           try {
-            payload = JSON.parse(decodeURIComponent(rawValue.slice('RDPDOC:'.length)));
+            targets = JSON.parse(decodeURIComponent(rawTargets));
           } catch {
-            marker.remove();
             continue;
           }
 
-          const target = findNextElementAfterMarker(marker);
-          marker.remove();
-          if (!target || !payload?.commandUri) {
-            continue;
-          }
+          const blockElements = collectTargetableBlocks(flow);
+          for (let index = 0; index < Math.min(blockElements.length, targets.length); index += 1) {
+            const targetElement = blockElements[index];
+            const targetData = targets[index];
+            if (!targetElement || !targetData?.commandUri) {
+              continue;
+            }
 
-          target.classList.add('doc-clickable');
-          target.setAttribute('data-source-command', String(payload.commandUri));
-          target.setAttribute('tabindex', '0');
-          target.setAttribute('role', 'link');
-          if (payload.label) {
-            target.setAttribute('title', String(payload.label));
+            const clickableSurface = ensureListItemClickableSurface(targetElement);
+            clickableSurface.classList.add('doc-clickable');
+            clickableSurface.setAttribute('data-source-command', String(targetData.commandUri));
+            clickableSurface.setAttribute('tabindex', '0');
+            clickableSurface.setAttribute('role', 'link');
+            if (targetData.label) {
+              clickableSurface.setAttribute('title', String(targetData.label));
+            }
           }
         }
       };
@@ -5346,17 +5377,25 @@ function parseDocumentationHeader(line) {
 
 function parseInlineDocumentationLine(line) {
   const trimmed = String(line || "").trimStart();
-  if (!trimmed.startsWith("#>")) {
+  const match = trimmed.match(/^#(>+)(.*)$/);
+  if (!match) {
     return null;
   }
 
-  let text = trimmed.slice(2);
+  const marker = String(match[1] || ">");
+  const nestingLevel = Math.max(0, marker.length - 1);
+  let text = String(match[2] || "");
   if (text.startsWith(" ") || text.startsWith("\t")) {
     text = text.slice(1);
   }
 
+  if (nestingLevel > 0 && text.length > 0) {
+    text = `${"  ".repeat(nestingLevel)}${text}`;
+  }
+
   return {
-    text
+    text,
+    nestingLevel
   };
 }
 
@@ -11739,17 +11778,6 @@ async function renderMarkdownToHtml(markdown) {
   return `<pre>${escapeHtml(markdown || "")}</pre>`;
 }
 
-function isMarkdownListItemLine(line) {
-  return /^\s{0,3}(?:[-*+]|\d+[.)])\s+\S/.test(String(line || ""));
-}
-
-function buildDocumentationSourceMarker(commandUri, label) {
-  if (!commandUri) {
-    return "";
-  }
-  return `<!--RDPDOC:${encodeURIComponent(JSON.stringify({ commandUri, label }))}-->`;
-}
-
 function createDocumentationRenderItem(kind, markdownLines = [], options = {}) {
   return {
     kind,
@@ -11757,6 +11785,10 @@ function createDocumentationRenderItem(kind, markdownLines = [], options = {}) {
     commandUri: String(options.commandUri || ""),
     label: String(options.label || "")
   };
+}
+
+function isMarkdownListItemLine(line) {
+  return /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(String(line || ""));
 }
 
 function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
@@ -11812,12 +11844,23 @@ function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
       continue;
     }
 
-    if (isHeading || isListItem) {
+    if (isHeading) {
       flushParagraph();
       items.push(
-        createDocumentationRenderItem("chunk", [text], {
+        createDocumentationRenderItem("heading", [text], {
           commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
-          label: isHeading ? `Open heading line ${sourceLine + 1}` : `Open list item line ${sourceLine + 1}`
+          label: `Open heading line ${sourceLine + 1}`
+        })
+      );
+      continue;
+    }
+
+    if (isListItem) {
+      flushParagraph();
+      items.push(
+        createDocumentationRenderItem("list-item", [text], {
+          commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+          label: `Open list item line ${sourceLine + 1}`
         })
       );
       continue;
@@ -11833,7 +11876,7 @@ function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
   return items;
 }
 
-function buildDocumentationRenderMarkdown(documentUri, block) {
+function buildDocumentationRenderData(documentUri, block) {
   const fragments =
     Array.isArray(block?.fragments) && block.fragments.length > 0
       ? block.fragments
@@ -11846,38 +11889,65 @@ function buildDocumentationRenderMarkdown(documentUri, block) {
         ];
 
   const markdownLines = [];
-  let previousWasBlank = false;
+  const rawItems = [];
+  const targets = [];
 
   for (const fragment of fragments) {
     const items = buildDocumentationRenderItemsForFragment(documentUri, fragment);
-    for (const item of items) {
-      if (item.kind === "blank") {
-        if (!previousWasBlank) {
-          markdownLines.push("");
-          previousWasBlank = true;
-        }
+    rawItems.push(...items);
+  }
+
+  const mergedItems = [];
+  for (const item of rawItems) {
+    if (item.kind === "blank") {
+      const previous = mergedItems[mergedItems.length - 1];
+      if (!previous || previous.kind !== "blank") {
+        mergedItems.push(createDocumentationRenderItem("blank", [""]));
+      }
+      continue;
+    }
+
+    const previous = mergedItems[mergedItems.length - 1];
+    if (item.kind === "chunk" && previous && previous.kind === "chunk") {
+      previous.markdownLines.push(...item.markdownLines);
+      continue;
+    }
+
+    mergedItems.push(createDocumentationRenderItem(item.kind, item.markdownLines, item));
+  }
+
+  for (const item of mergedItems) {
+    if (item.kind === "blank") {
+      if (markdownLines.length === 0 || markdownLines[markdownLines.length - 1] === "") {
         continue;
       }
-
-      const marker = buildDocumentationSourceMarker(item.commandUri, item.label);
-      if (marker) {
-        markdownLines.push(marker);
-      }
-      markdownLines.push(...item.markdownLines);
-      previousWasBlank = item.markdownLines.length > 0 && item.markdownLines[item.markdownLines.length - 1].trim().length === 0;
+      markdownLines.push("");
+      continue;
     }
+
+    targets.push({
+      commandUri: item.commandUri,
+      label: item.label,
+      kind: item.kind
+    });
+    markdownLines.push(...item.markdownLines);
   }
 
   while (markdownLines.length > 0 && markdownLines[markdownLines.length - 1] === "") {
     markdownLines.pop();
   }
 
-  return markdownLines.join("\n");
+  return {
+    markdown: markdownLines.join("\n"),
+    targets
+  };
 }
 
 async function renderDocumentationBlockHtml(documentUri, block) {
-  const annotatedMarkdown = buildDocumentationRenderMarkdown(documentUri, block);
-  return renderMarkdownToHtml(formatMarkdownForDisplay(annotatedMarkdown));
+  const renderData = buildDocumentationRenderData(documentUri, block);
+  const renderedHtml = await renderMarkdownToHtml(formatMarkdownForDisplay(renderData.markdown));
+  const encodedTargets = escapeHtmlAttribute(encodeURIComponent(JSON.stringify(renderData.targets || [])));
+  return `<section class="doc-render-flow" data-doc-render-targets="${encodedTargets}">${renderedHtml}</section>`;
 }
 
 function styleEnumDetailsForPanel(renderedHtml) {

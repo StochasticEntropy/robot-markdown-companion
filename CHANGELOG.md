@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.35
+
+- Restored cleaner first-level inline-documentation list flow while keeping nested list items independently clickable by using a lightweight inline click surface instead of a block-style wrapper.
+
+## 0.4.34
+
+- Refined nested inline-documentation highlighting so individually clickable list items only highlight their own row instead of visually lighting up the complete parent list block.
+
+## 0.4.33
+
+- Fixed nested inline-documentation click handling so second-level and deeper list items get their own Robot-source jump targets instead of only the parent list item being clickable.
+
+## 0.4.32
+
+- Added nested inline-documentation markers like `#>>` and `#>>>`, which automatically indent markdown content and keep each nested list item independently clickable in the preview.
+
+## 0.4.31
+
+- Fixed inline-documentation preview source jumps again by attaching click targets through nested markdown wrapper elements, so rendered headings and list blocks reliably jump back to the correct Robot source line.
+
+## 0.4.30
+
+- Fixed inline-documentation preview list rendering so the markdown stays clean and continuous, allowing consecutive numbered and bulleted lines to remain grouped while still keeping Robot-source jump targets.
+
 ## 0.4.29
 
 - Changed inline-documentation preview rendering back to a single markdown flow, so numbered lists and bullet lists can continue consistently across multiple `#>` documentation blocks while still keeping Robot-source jump targets.

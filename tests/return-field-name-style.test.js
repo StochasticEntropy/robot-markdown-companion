@@ -113,6 +113,19 @@ const workerModule = require("../src/core/return-worker.js");
 const extensionTestApi = extensionModule.__test__;
 const workerTestApi = workerModule.__test__;
 
+function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
+  const text = String(source || "").replace(/^\n/, "");
+  return {
+    uri: {
+      toString: () => `file://${filePath}`,
+      fsPath: filePath,
+      path: filePath
+    },
+    version: 1,
+    getText: () => text
+  };
+}
+
 function createIndex(structuredTypes) {
   const structuredTypesByName = new Map();
   const moduleInfoByFile = new Map();
@@ -669,11 +682,116 @@ function runSecondLevelPreviewRenderingTests() {
   assert(!markdown.includes("Showing first 12"));
 }
 
-runPythonCamelCaseDetectionTests();
-runPythonPropertyParsingTests();
-runPythonPropertyAliasParsingTests();
-runReturnFieldNameStyleTests();
-runPropertyInclusionTests();
-runCompletionMatchingTests();
-runSecondLevelPreviewRenderingTests();
-console.log("return-field-name-style tests passed");
+async function runInlineDocumentationTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case One
+    [Documentation]    Intro line
+    ...    More intro
+    Log    before
+    #> ## Inline Head
+    #> paragraph line
+    #>
+    #> - bullet
+    Log    between
+    # just a normal comment
+    #> ## Followup
+    #> after followup
+Case Two
+    #> ## Other Head
+    #> other text
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+
+  assert.strictEqual(parsed.blocks.length, 2);
+
+  const firstBlock = parsed.blocks[0];
+  assert.strictEqual(firstBlock.ownerName, "Case One");
+  assert.strictEqual(firstBlock.title, "Inline Head");
+  assert.deepStrictEqual(
+    firstBlock.fragments.map((fragment) => fragment.sourceKind),
+    ["documentation", "inline", "inline"]
+  );
+  assert.deepStrictEqual(firstBlock.lineSpans, [
+    { startLine: 2, endLine: 3 },
+    { startLine: 5, endLine: 8 },
+    { startLine: 11, endLine: 12 }
+  ]);
+  assert(firstBlock.markdown.includes("Intro line"));
+  assert(firstBlock.markdown.includes("## Inline Head"));
+  assert(firstBlock.markdown.includes("## Followup"));
+  assert(!firstBlock.markdown.includes("just a normal comment"));
+
+  const inlineSpan = extensionTestApi.getContainingBlockSpan(firstBlock, 6);
+  assert.deepStrictEqual(inlineSpan, { startLine: 5, endLine: 8 });
+  assert.strictEqual(extensionTestApi.getContainingBlockSpan(firstBlock, 9), undefined);
+  assert.strictEqual(extensionTestApi.findNearestBlock(parsed.blocks, 9).id, firstBlock.id);
+
+  const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), firstBlock);
+  assert(renderedHtml.includes('data-doc-render-targets="'));
+  assert(renderedHtml.includes(encodeURIComponent(extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 2))));
+  assert(renderedHtml.includes(encodeURIComponent(extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 5))));
+  assert(renderedHtml.includes(encodeURIComponent(extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 11))));
+  assert.strictEqual((renderedHtml.match(/<pre>/g) || []).length, 1);
+  assert(!renderedHtml.includes('data-source-command="'));
+  const targetMatch = renderedHtml.match(/data-doc-render-targets="([^"]+)"/);
+  assert(targetMatch);
+  const decodedTargets = JSON.parse(decodeURIComponent(targetMatch[1]));
+  assert.strictEqual(decodedTargets.length, 6);
+  assert(decodedTargets.some((target) => target.kind === "list-item" && String(target.label).includes("line 9")));
+
+  const secondBlock = parsed.blocks[1];
+  assert.strictEqual(secondBlock.ownerName, "Case Two");
+  assert.strictEqual(secondBlock.title, "Other Head");
+  assert.deepStrictEqual(secondBlock.fragments.map((fragment) => fragment.sourceKind), ["inline"]);
+}
+
+async function runIndentedInlineDocumentationTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Nested
+    #> - first item
+    #>> - second item
+    #>>> - third item
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+  const block = parsed.blocks[0];
+
+  assert(block.markdown.includes("- first item"));
+  assert(block.markdown.includes("  - second item"));
+  assert(block.markdown.includes("    - third item"));
+
+  const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), block);
+  assert(renderedHtml.includes("- first item"));
+  assert(renderedHtml.includes("  - second item"));
+  assert(renderedHtml.includes("    - third item"));
+
+  const targetMatch = renderedHtml.match(/data-doc-render-targets="([^"]+)"/);
+  assert(targetMatch);
+  const decodedTargets = JSON.parse(decodeURIComponent(targetMatch[1]));
+  const listTargets = decodedTargets.filter((target) => target.kind === "list-item");
+  assert.strictEqual(listTargets.length, 3);
+  assert(listTargets.some((target) => String(target.label).includes("line 3")));
+  assert(listTargets.some((target) => String(target.label).includes("line 4")));
+  assert(listTargets.some((target) => String(target.label).includes("line 5")));
+}
+
+async function main() {
+  runPythonCamelCaseDetectionTests();
+  runPythonPropertyParsingTests();
+  runPythonPropertyAliasParsingTests();
+  runReturnFieldNameStyleTests();
+  runPropertyInclusionTests();
+  runCompletionMatchingTests();
+  runSecondLevelPreviewRenderingTests();
+  await runInlineDocumentationTests();
+  await runIndentedInlineDocumentationTests();
+  console.log("return-field-name-style tests passed");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
