@@ -46,6 +46,7 @@ function loadExtensionModule() {
         },
         languages: {
           registerCodeLensProvider: () => ({ dispose() {} }),
+          registerFoldingRangeProvider: () => ({ dispose() {} }),
           registerHoverProvider: () => ({ dispose() {} }),
           registerCompletionItemProvider: () => ({ dispose() {} })
         },
@@ -63,6 +64,13 @@ function loadExtensionModule() {
         Range: class {},
         Position: class {},
         Hover: class {},
+        FoldingRange: class {
+          constructor(start, end, kind) {
+            this.start = start;
+            this.end = end;
+            this.kind = kind;
+          }
+        },
         CompletionItem: class {},
         CodeLens: class {},
         TreeItem: class {},
@@ -78,6 +86,9 @@ function loadExtensionModule() {
           None: 0,
           Collapsed: 1,
           Expanded: 2
+        },
+        FoldingRangeKind: {
+          Region: "region"
         },
         Uri: {
           joinPath: (...parts) => ({
@@ -778,6 +789,92 @@ Case Nested
   assert(listTargets.some((target) => String(target.label).includes("line 5")));
 }
 
+function runDocumentationFoldingTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Headings
+    #> ## Start
+    #> intro
+    Log    top one
+    #> ### Child
+    #> child text
+    Log    child one
+    #> ## Next
+    #> next text
+Case PlainInline
+    #> first line
+    #> second line
+    Log    gap
+Case Classic
+    [Documentation]    ## Intro
+    ...    intro text
+    ...    ### Deep
+    ...    deep text
+    ...    ## Next
+    ...    next text
+    Log    classic action
+Case MixedContiguous
+    [Documentation]    ## Parent
+    ...    parent text
+    #> ### Child
+    #> child text
+    Log    child action
+Case HeadingThenPlainMarker
+    #> ### Testdaten anlegen
+    Log    prep one
+    #> 1. Antragsdaten in MockDatenbank schreiben
+    Log    prep two
+    #> ### Leistung Einweisen und Nachtverarbeitung starten
+    Log    step two
+Case PlainClassic
+    [Documentation]    line one
+    ...    line two
+    Log    classic action
+Case NoFold
+    # comment only
+    Log    noop
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+
+  const classicEntries = parsed.blocks.find((block) => block.ownerName === "Case Classic").fragments[0].lineEntries;
+  assert.deepStrictEqual(
+    classicEntries.map((entry) => ({
+      sourceLine: entry.sourceLine,
+      headingLevel: entry.headingLevel
+    })),
+    [
+      { sourceLine: 15, headingLevel: 2 },
+      { sourceLine: 16, headingLevel: 0 },
+      { sourceLine: 17, headingLevel: 3 },
+      { sourceLine: 18, headingLevel: 0 },
+      { sourceLine: 19, headingLevel: 2 },
+      { sourceLine: 20, headingLevel: 0 }
+    ]
+  );
+
+  const foldingRanges = extensionTestApi.buildDocumentationFoldingRanges(parsed.blocks);
+  assert.deepStrictEqual(foldingRanges, [
+    { startLine: 2, endLine: 7 },
+    { startLine: 3, endLine: 4 },
+    { startLine: 5, endLine: 7 },
+    { startLine: 6, endLine: 7 },
+    { startLine: 8, endLine: 9 },
+    { startLine: 11, endLine: 13 },
+    { startLine: 15, endLine: 18 },
+    { startLine: 17, endLine: 18 },
+    { startLine: 19, endLine: 21 },
+    { startLine: 20, endLine: 21 },
+    { startLine: 23, endLine: 27 },
+    { startLine: 25, endLine: 27 },
+    { startLine: 26, endLine: 27 },
+    { startLine: 29, endLine: 32 },
+    { startLine: 31, endLine: 32 },
+    { startLine: 33, endLine: 34 },
+    { startLine: 36, endLine: 38 }
+  ]);
+}
+
 async function main() {
   runPythonCamelCaseDetectionTests();
   runPythonPropertyParsingTests();
@@ -788,6 +885,7 @@ async function main() {
   runSecondLevelPreviewRenderingTests();
   await runInlineDocumentationTests();
   await runIndentedInlineDocumentationTests();
+  runDocumentationFoldingTests();
   console.log("return-field-name-style tests passed");
 }
 

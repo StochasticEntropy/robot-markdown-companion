@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.39
+
+- Fixed documentation-driven folding so the last heading in a testcase/keyword also folds to the end of the owner block, while plain `#>` lines inside that section keep their own child collapse ranges.
+
+## 0.4.38
+
+- Refined documentation-driven editor folding so markdown headings now own everything until the next heading of the same or higher level, instead of being interrupted by plain `#>` lines inside the same owner section.
+
+## 0.4.37
+
+- Changed Robot editor folding so documentation lines act as section markers and collapse the testcase/keyword steps that follow them until the next documentation marker or the end of the owner block.
+
+## 0.4.36
+
+- Added Robot editor folding for inline `#>` documentation and classic `[Documentation]` blocks, including heading-based nested folds and fallback folding for plain multi-line documentation runs.
+
 ## 0.4.35
 
 - Restored cleaner first-level inline-documentation list flow while keeping nested list items independently clickable by using a lightweight inline click surface instead of a block-style wrapper.

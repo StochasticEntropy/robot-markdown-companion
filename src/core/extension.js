@@ -354,6 +354,7 @@ function activate(context) {
     returnComputeWorker
   );
   const codeLensProvider = new RobotDocCodeLensProvider(parser);
+  const foldingRangeProvider = new RobotDocFoldingRangeProvider(parser);
   const typedVariableCompletionProvider = new RobotTypedVariableCompletionProvider(
     parser,
     enumHintService,
@@ -381,6 +382,7 @@ function activate(context) {
     returnPreviewProvider,
     returnController,
     codeLensProvider,
+    foldingRangeProvider,
     typedVariableCompletionProvider,
     vscode.window.registerWebviewViewProvider(VIEW_ID, previewProvider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -389,6 +391,7 @@ function activate(context) {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.languages.registerCodeLensProvider(ROBOT_SELECTOR, codeLensProvider),
+    vscode.languages.registerFoldingRangeProvider(ROBOT_SELECTOR, foldingRangeProvider),
     vscode.languages.registerHoverProvider(
       ROBOT_SELECTOR,
       new RobotDocHoverProvider(parser, enumHintService, runtimeCacheService, returnComputeWorker)
@@ -2367,6 +2370,23 @@ class RobotDocCodeLensProvider {
           command: CMD_OPEN_BLOCK_AT,
           arguments: [document.uri.toString(), block.id]
         })
+    );
+  }
+}
+
+class RobotDocFoldingRangeProvider {
+  constructor(parser) {
+    this._parser = parser;
+  }
+
+  provideFoldingRanges(document) {
+    if (!isRobotDocument(document) || isRobotCompanionPausedForDebug()) {
+      return [];
+    }
+
+    const parsed = this._parser.getParsed(document);
+    return buildDocumentationFoldingRanges(parsed.blocks).map(
+      (range) => new vscode.FoldingRange(range.startLine, range.endLine, vscode.FoldingRangeKind.Region)
     );
   }
 }
@@ -5441,7 +5461,12 @@ function stripRobotCellSeparator(textAfterPrefix) {
 }
 
 function isMarkdownHeadingLine(line) {
-  return /^\s{0,3}#{1,6}\s+\S/.test(String(line || ""));
+  return getMarkdownHeadingLevel(line) > 0;
+}
+
+function getMarkdownHeadingLevel(line) {
+  const match = String(line || "").match(/^\s{0,3}(#{1,6})\s+\S/);
+  return match ? String(match[1] || "").length : 0;
 }
 
 function mergeDocumentationFragmentsToMarkdown(fragments) {
@@ -5469,14 +5494,16 @@ function createDocumentationFragment(sourceKind, owner, startLine, endLine, mark
   const safeMarkdownLines = Array.isArray(markdownLines) ? markdownLines.map((line) => String(line || "")) : [];
   const safeStartLine = Math.max(0, Number(startLine) || 0);
   const safeEndLine = Math.max(safeStartLine, Number(endLine) || safeStartLine);
-  const lineEntries =
-    sourceKind === "inline"
-      ? (Array.isArray(options.lineEntries) ? options.lineEntries : []).map((entry) => ({
-          text: String(entry?.text || ""),
-          sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
-          isHeading: Boolean(entry?.isHeading)
-        }))
-      : [];
+  const lineEntries = (Array.isArray(options.lineEntries) ? options.lineEntries : []).map((entry) => {
+    const text = String(entry?.text || "");
+    const headingLevel = Math.max(0, Number(entry?.headingLevel) || getMarkdownHeadingLevel(text));
+    return {
+      text,
+      sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
+      isHeading: headingLevel > 0 || Boolean(entry?.isHeading),
+      headingLevel
+    };
+  });
 
   return {
     id: `${String(owner?.id || "owner")}:${sourceKind}:${safeStartLine}`,
@@ -5527,8 +5554,15 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
     const docHeader = parseDocumentationHeader(lines[lineIndex]);
     if (docHeader) {
       const markdownLines = [];
+      const lineEntries = [];
       if (docHeader.inlineText.length > 0) {
         markdownLines.push(docHeader.inlineText);
+        lineEntries.push({
+          text: docHeader.inlineText,
+          sourceLine: lineIndex,
+          isHeading: isMarkdownHeadingLine(docHeader.inlineText),
+          headingLevel: getMarkdownHeadingLevel(docHeader.inlineText)
+        });
       }
 
       let endLine = lineIndex;
@@ -5539,12 +5573,22 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
           break;
         }
         markdownLines.push(continuation.text);
+        lineEntries.push({
+          text: continuation.text,
+          sourceLine: nextLine,
+          isHeading: isMarkdownHeadingLine(continuation.text),
+          headingLevel: getMarkdownHeadingLevel(continuation.text)
+        });
         endLine = nextLine;
       }
 
       const builder = ensureDocumentationBlockBuilder(buildersByOwnerId, owner);
       if (builder) {
-        builder.fragments.push(createDocumentationFragment("documentation", owner, lineIndex, endLine, markdownLines));
+        builder.fragments.push(
+          createDocumentationFragment("documentation", owner, lineIndex, endLine, markdownLines, {
+            lineEntries
+          })
+        );
       }
       lineIndex = endLine;
       continue;
@@ -5560,7 +5604,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
       {
         text: inlineDoc.text,
         sourceLine: lineIndex,
-        isHeading: isMarkdownHeadingLine(inlineDoc.text)
+        isHeading: isMarkdownHeadingLine(inlineDoc.text),
+        headingLevel: getMarkdownHeadingLevel(inlineDoc.text)
       }
     ];
 
@@ -5578,7 +5623,8 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
       lineEntries.push({
         text: nextInlineDoc.text,
         sourceLine: nextLine,
-        isHeading: isMarkdownHeadingLine(nextInlineDoc.text)
+        isHeading: isMarkdownHeadingLine(nextInlineDoc.text),
+        headingLevel: getMarkdownHeadingLevel(nextInlineDoc.text)
       });
       endLine = nextLine;
     }
@@ -5616,6 +5662,7 @@ function buildDocumentationBlocks(lines, owners, ownerByLine) {
       ownerName: owner.name,
       ownerId: owner.id,
       ownerStartLine: owner.startLine,
+      ownerEndLine: owner.endLine,
       section: owner.section,
       title,
       markdown,
@@ -5675,6 +5722,170 @@ function getBlockLineSpans(block) {
       endLine: Math.max(0, Number(block?.endLine) || 0)
     }
   ];
+}
+
+function getDocumentationFragmentLineEntries(fragment) {
+  const safeStartLine = Math.max(0, Number(fragment?.startLine) || 0);
+  const rawEntries =
+    Array.isArray(fragment?.lineEntries) && fragment.lineEntries.length > 0
+      ? fragment.lineEntries
+      : String(fragment?.markdown || "")
+          .split(/\r?\n/)
+          .map((text, index) => ({
+            text,
+            sourceLine: safeStartLine + index
+          }));
+
+  return rawEntries
+    .map((entry) => {
+      const text = String(entry?.text || "");
+      const headingLevel = Math.max(0, Number(entry?.headingLevel) || getMarkdownHeadingLevel(text));
+      return {
+        text,
+        sourceLine: Math.max(0, Number(entry?.sourceLine) || safeStartLine),
+        isHeading: headingLevel > 0 || Boolean(entry?.isHeading),
+        headingLevel
+      };
+    })
+    .sort((left, right) => left.sourceLine - right.sourceLine);
+}
+
+function getContiguousDocumentationFragmentGroups(fragments) {
+  const sorted = (Array.isArray(fragments) ? fragments : [])
+    .map((fragment) => ({
+      ...fragment,
+      startLine: Math.max(0, Number(fragment?.startLine) || 0),
+      endLine: Math.max(0, Number(fragment?.endLine) || 0)
+    }))
+    .sort((left, right) => left.startLine - right.startLine);
+
+  const groups = [];
+  let currentGroup = [];
+
+  for (const fragment of sorted) {
+    const previous = currentGroup[currentGroup.length - 1];
+    if (!previous || fragment.startLine <= previous.endLine + 1) {
+      currentGroup.push(fragment);
+      continue;
+    }
+    groups.push(currentGroup);
+    currentGroup = [fragment];
+  }
+
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  return groups;
+}
+
+function getDocumentationSectionMarkers(block) {
+  const fragments = (Array.isArray(block?.fragments) ? block.fragments : [])
+    .map((fragment) => ({
+      ...fragment,
+      startLine: Math.max(0, Number(fragment?.startLine) || 0)
+    }))
+    .sort((left, right) => left.startLine - right.startLine);
+
+  const markers = [];
+  for (const fragment of fragments) {
+    const entries = getDocumentationFragmentLineEntries(fragment);
+    let previousWasPlainText = false;
+
+    for (const entry of entries) {
+      if (entry.text.trim().length === 0) {
+        previousWasPlainText = false;
+        continue;
+      }
+
+      if (entry.headingLevel > 0) {
+        markers.push({
+          kind: "heading",
+          startLine: entry.sourceLine,
+          headingLevel: entry.headingLevel
+        });
+        previousWasPlainText = false;
+        continue;
+      }
+
+      if (!previousWasPlainText) {
+        markers.push({
+          kind: "fragment",
+          startLine: entry.sourceLine,
+          headingLevel: 0
+        });
+      }
+      previousWasPlainText = true;
+    }
+  }
+
+  return markers.sort((left, right) => {
+    if (left.startLine !== right.startLine) {
+      return left.startLine - right.startLine;
+    }
+    if (left.kind !== right.kind) {
+      return left.kind === "fragment" ? -1 : 1;
+    }
+    return left.headingLevel - right.headingLevel;
+  });
+}
+
+function pushDocumentationFoldingRange(ranges, seenKeys, startLine, endLine) {
+  const safeStartLine = Math.max(0, Number(startLine) || 0);
+  const safeEndLine = Math.max(0, Number(endLine) || 0);
+  if (safeEndLine <= safeStartLine) {
+    return;
+  }
+
+  const key = `${safeStartLine}:${safeEndLine}`;
+  if (seenKeys.has(key)) {
+    return;
+  }
+
+  seenKeys.add(key);
+  ranges.push({
+    startLine: safeStartLine,
+    endLine: safeEndLine
+  });
+}
+
+function buildDocumentationFoldingRanges(blocks) {
+  const ranges = [];
+  const seenKeys = new Set();
+
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const markers = getDocumentationSectionMarkers(block);
+    const ownerEndLine = Math.max(
+      Math.max(0, Number(block?.ownerEndLine) || 0),
+      Math.max(0, Number(block?.endLine) || 0)
+    );
+
+    for (let markerIndex = 0; markerIndex < markers.length; markerIndex += 1) {
+      const currentMarker = markers[markerIndex];
+      let endLine = ownerEndLine;
+
+      for (let nextIndex = markerIndex + 1; nextIndex < markers.length; nextIndex += 1) {
+        const candidate = markers[nextIndex];
+        if (currentMarker.kind !== "heading") {
+          endLine = candidate.startLine - 1;
+          break;
+        }
+        if (candidate.kind === "heading" && candidate.headingLevel <= currentMarker.headingLevel) {
+          endLine = candidate.startLine - 1;
+          break;
+        }
+      }
+
+      pushDocumentationFoldingRange(ranges, seenKeys, currentMarker.startLine, endLine);
+    }
+  }
+
+  return ranges.sort((left, right) => {
+    if (left.startLine !== right.startLine) {
+      return left.startLine - right.startLine;
+    }
+    return left.endLine - right.endLine;
+  });
 }
 
 function getContainingBlockSpan(block, line) {
@@ -12406,6 +12617,7 @@ module.exports = {
     RobotDocumentationService,
     findNearestBlock,
     getContainingBlockSpan,
+    buildDocumentationFoldingRanges,
     renderDocumentationBlockHtml,
     buildOpenLocationCommandUri,
     parseStructuredTypesFromPythonSource,
