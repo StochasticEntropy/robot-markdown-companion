@@ -1,18 +1,38 @@
 const assert = require("assert");
+const path = require("path");
 const vscode = require("vscode");
 
 const EXTENSION_ID = "StochasticEntropy.robot-markdown-companion";
-const FIXTURE_GLOB = "folding-regression.robot";
-const HEADLINE_RANGES = [
-  { start: 3, end: 9 },
-  { start: 10, end: 13 }
+const FIXTURE_SCENARIOS = [
+  {
+    fixtureName: "folding-regression.robot",
+    label: "testcase owner",
+    headlineRanges: [
+      { start: 3, end: 9 },
+      { start: 10, end: 13 }
+    ],
+    firstLevelRanges: [
+      { start: 4, end: 7 },
+      { start: 8, end: 9 },
+      { start: 11, end: 13 }
+    ],
+    secondLevelRanges: [{ start: 6, end: 7 }]
+  },
+  {
+    fixtureName: "folding-regression-keywords.robot",
+    label: "keyword owner",
+    headlineRanges: [
+      { start: 3, end: 9 },
+      { start: 10, end: 13 }
+    ],
+    firstLevelRanges: [
+      { start: 4, end: 7 },
+      { start: 8, end: 9 },
+      { start: 11, end: 13 }
+    ],
+    secondLevelRanges: [{ start: 6, end: 7 }]
+  }
 ];
-const FIRST_LEVEL_RANGES = [
-  { start: 4, end: 7 },
-  { start: 8, end: 9 },
-  { start: 11, end: 13 }
-];
-const SECOND_LEVEL_RANGES = [{ start: 6, end: 7 }];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,10 +104,10 @@ async function waitForCursorDownResult(editor, startLine, expectedLine, label) {
 suite("Robot Companion documentation folding UI", function () {
   this.timeout(90000);
 
-  let document;
+  const documentsByFixtureName = new Map();
   let editor;
 
-  async function resetEditorState() {
+  async function resetEditorState(document) {
     editor = await vscode.window.showTextDocument(document, {
       preview: false
     });
@@ -100,21 +120,19 @@ suite("Robot Companion documentation folding UI", function () {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert(extension, `Expected extension ${EXTENSION_ID} to be available in the test host.`);
     await extension.activate();
-
-    const fixtureUris = await vscode.workspace.findFiles(FIXTURE_GLOB);
-    assert.strictEqual(fixtureUris.length, 1, "Expected exactly one folding regression fixture in the workspace.");
-
-    document = await vscode.workspace.openTextDocument(fixtureUris[0]);
-    editor = await vscode.window.showTextDocument(document, {
-      preview: false
-    });
-
     await vscode.commands.executeCommand("robotCompanion.useAsDefaultFoldingProvider");
-    await resetEditorState();
-  });
 
-  setup(async () => {
-    await resetEditorState();
+    const fixtureUris = await vscode.workspace.findFiles("*.robot");
+    for (const fixtureUri of fixtureUris) {
+      documentsByFixtureName.set(path.basename(fixtureUri.fsPath), await vscode.workspace.openTextDocument(fixtureUri));
+    }
+
+    for (const scenario of FIXTURE_SCENARIOS) {
+      assert(
+        documentsByFixtureName.has(scenario.fixtureName),
+        `Expected fixture ${scenario.fixtureName} to be present in the workspace.`
+      );
+    }
   });
 
   test("stores the workspace override for the Robot Companion folding provider", async () => {
@@ -131,43 +149,60 @@ suite("Robot Companion documentation folding UI", function () {
     );
   });
 
-  test("foldDocumentationToHeadlines exposes only headline ranges and skips nested bodies in the editor", async () => {
-    await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
-    await waitForFoldingRanges(document, HEADLINE_RANGES, "headline folding ranges");
-    await waitForCursorDownResult(editor, 2, 9, "headline fold should jump from the first headline to the next headline");
-  });
+  for (const scenario of FIXTURE_SCENARIOS) {
+    suite(`${scenario.label} fixture`, () => {
+      let document;
 
-  test("foldDocumentationToFirstLevel exposes only first-level ranges and keeps the testcase visible", async () => {
-    await vscode.commands.executeCommand("robotCompanion.foldDocumentationToFirstLevel");
-    await waitForFoldingRanges(document, FIRST_LEVEL_RANGES, "first-level folding ranges");
-    await waitForCursorDownResult(
-      editor,
-      3,
-      7,
-      "first-level fold should jump from the first top-level marker to the next top-level peer"
-    );
-  });
+      setup(async () => {
+        document = documentsByFixtureName.get(scenario.fixtureName);
+        assert(document, `Expected document for fixture ${scenario.fixtureName}.`);
+        await resetEditorState(document);
+      });
 
-  test("foldDocumentationToSecondLevel exposes only nested ranges and skips only the nested body", async () => {
-    await vscode.commands.executeCommand("robotCompanion.foldDocumentationToSecondLevel");
-    await waitForFoldingRanges(document, SECOND_LEVEL_RANGES, "second-level folding ranges");
-    await waitForCursorDownResult(
-      editor,
-      5,
-      7,
-      "second-level fold should jump from the nested marker to the next visible top-level marker"
-    );
-  });
+      test("foldDocumentationToHeadlines exposes only headline ranges and skips nested bodies in the editor", async () => {
+        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
+        await waitForFoldingRanges(document, scenario.headlineRanges, "headline folding ranges");
+        await waitForCursorDownResult(
+          editor,
+          2,
+          9,
+          "headline fold should jump from the first headline to the next headline"
+        );
+      });
 
-  test("unfoldDocumentation restores line-by-line cursor movement", async () => {
-    await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
-    await waitForFoldingRanges(document, HEADLINE_RANGES, "headline folding ranges before unfolding");
+      test("foldDocumentationToFirstLevel exposes only first-level ranges and keeps the owner visible", async () => {
+        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToFirstLevel");
+        await waitForFoldingRanges(document, scenario.firstLevelRanges, "first-level folding ranges");
+        await waitForCursorDownResult(
+          editor,
+          3,
+          7,
+          "first-level fold should jump from the first top-level marker to the next top-level peer"
+        );
+      });
 
-    await vscode.commands.executeCommand("robotCompanion.unfoldDocumentation");
-    await sleep(250);
+      test("foldDocumentationToSecondLevel exposes only nested ranges and skips only the nested body", async () => {
+        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToSecondLevel");
+        await waitForFoldingRanges(document, scenario.secondLevelRanges, "second-level folding ranges");
+        await waitForCursorDownResult(
+          editor,
+          5,
+          7,
+          "second-level fold should jump from the nested marker to the next visible top-level marker"
+        );
+      });
 
-    await waitForCursorDownResult(editor, 2, 3, "headline marker should move to the next line after unfold");
-    await waitForCursorDownResult(editor, 3, 4, "first-level marker should move to the next line after unfold");
-    await waitForCursorDownResult(editor, 5, 6, "second-level marker should move to the next line after unfold");
-  });
+      test("unfoldDocumentation restores line-by-line cursor movement", async () => {
+        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
+        await waitForFoldingRanges(document, scenario.headlineRanges, "headline folding ranges before unfolding");
+
+        await vscode.commands.executeCommand("robotCompanion.unfoldDocumentation");
+        await sleep(250);
+
+        await waitForCursorDownResult(editor, 2, 3, "headline marker should move to the next line after unfold");
+        await waitForCursorDownResult(editor, 3, 4, "first-level marker should move to the next line after unfold");
+        await waitForCursorDownResult(editor, 5, 6, "second-level marker should move to the next line after unfold");
+      });
+    });
+  }
 });

@@ -1029,6 +1029,47 @@ Case TieredClassicDoc
   );
 }
 
+function runKeywordDocumentationBodyFoldingTests() {
+  const document = createMockRobotDocument(`
+*** Keywords ***
+Keyword TieredInlineDocs
+    #> ### Headline
+    Log    heading intro
+    # comment hidden under headline
+    #> - first level
+    Log    first body one
+    Log    first body two
+    #>> - second level
+    Log    second body one
+    Log    second body two
+    #> plain overview note
+    Log    top body one
+    # regular hidden line
+Keyword TieredClassicDoc
+    [Documentation]    Classic summary
+    ...    Classic details
+    Log    classic body one
+    Log    classic body two
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+
+  const headlineRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 1);
+  assert.deepStrictEqual(headlineRanges, [
+    { startLine: 2, endLine: 13 },
+    { startLine: 15, endLine: 19 }
+  ]);
+
+  const firstLevelRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 2);
+  assert.deepStrictEqual(firstLevelRanges, [
+    { startLine: 5, endLine: 10 },
+    { startLine: 11, endLine: 13 }
+  ]);
+
+  const secondLevelRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 3);
+  assert.deepStrictEqual(secondLevelRanges, [{ startLine: 8, endLine: 9 }]);
+}
+
 function runDocumentationPreviewActionLinkTests() {
   const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml("file:///tmp/folding.robot");
   assert.match(previewActions, /command:robotCompanion\.foldDocumentationToHeadlines/);
@@ -1050,6 +1091,7 @@ async function main() {
   await runIndentedInlineDocumentationTests();
   runDocumentationFoldingTests();
   runDocumentationBodyFoldingTests();
+  runKeywordDocumentationBodyFoldingTests();
   runDocumentationPreviewActionLinkTests();
   console.log("return-field-name-style tests passed");
 }
