@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.54
+
+- Cleaned up folding regression scaffolding after the preview-folding iteration.
+- Checked in anonymized large Robot fixtures so UI folding tests no longer depend on local-only files.
+- Kept the preview fold actions aligned with VS Code native `Level 3`, `Level 4`, and `Level 5`.
+
 ## 0.4.53
 
 - Restored the underlying documentation folding behavior from `0.4.51`.
