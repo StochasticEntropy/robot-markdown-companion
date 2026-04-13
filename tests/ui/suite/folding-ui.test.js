@@ -89,6 +89,7 @@ const FIXTURE_SCENARIOS = [
     fixtureName: "folding-regression-adjustment.robot",
     label: "large adjustment testcase owner",
     ownerLine: 13,
+    previewSourceJumpLines: [162, 186, 199, 206, 207, 238, 333],
     expectedBodyRanges: {
       headline: [
         [74, 156],
@@ -251,6 +252,29 @@ async function runPreviewFoldCommand(command, document) {
   return vscode.window.activeTextEditor || targetEditor;
 }
 
+function decodeDocumentationRenderTargets(renderedHtml) {
+  const targetMatch = String(renderedHtml || "").match(/data-doc-render-targets="([^"]+)"/);
+  assert(targetMatch, "expected rendered preview HTML to expose encoded source targets");
+  return JSON.parse(decodeURIComponent(targetMatch[1]));
+}
+
+function parseCommandUri(commandUri) {
+  const rawCommandUri = String(commandUri || "");
+  const match = rawCommandUri.match(/^command:([^?]+)(?:\?(.*))?$/);
+  assert(match, `expected a VS Code command URI but got ${rawCommandUri}`);
+  const command = decodeURIComponent(match[1]);
+  const args = match[2] ? JSON.parse(decodeURIComponent(match[2])) : [];
+  return {
+    command,
+    args: Array.isArray(args) ? args : [args]
+  };
+}
+
+async function executeCommandUri(commandUri) {
+  const parsed = parseCommandUri(commandUri);
+  return vscode.commands.executeCommand(parsed.command, ...parsed.args);
+}
+
 async function createOwnerFold(editor, ownerLine) {
   await setCursor(editor, ownerLine);
   await vscode.commands.executeCommand("editor.fold");
@@ -262,6 +286,7 @@ suite("Robot Companion documentation folding UI", function () {
 
   const documentsByFixtureName = new Map();
   let editor;
+  let extensionTestApi;
 
   async function resetEditorState(document) {
     editor = await vscode.window.showTextDocument(document, {
@@ -276,6 +301,7 @@ suite("Robot Companion documentation folding UI", function () {
     const extension = vscode.extensions.getExtension(EXTENSION_ID);
     assert(extension, `Expected extension ${EXTENSION_ID} to be available in the test host.`);
     await extension.activate();
+    extensionTestApi = require(path.join(extension.extensionPath, "src/core/extension.js")).__test__;
     await vscode.commands.executeCommand("robotCompanion.useAsDefaultFoldingProvider");
 
     const fixtureUris = await vscode.workspace.findFiles("*.robot");
@@ -425,6 +451,57 @@ suite("Robot Companion documentation folding UI", function () {
           "preview unfold should restore line-by-line movement"
         );
       });
+
+      if (Array.isArray(scenario.previewSourceJumpLines) && scenario.previewSourceJumpLines.length > 0) {
+        test("preview render targets jump to the expected later source lines", async () => {
+          const parser = new extensionTestApi.RobotDocumentationService();
+          const parsed = parser.parse(document);
+          assert(parsed.blocks.length > 0, `Expected parsed documentation blocks for ${scenario.fixtureName}.`);
+
+          const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), parsed.blocks[0]);
+          assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
+          assert(!renderedHtml.includes("doc-fragment"), "preview HTML should stay a single markdown flow");
+          const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
+          const targetLinesInOrder = decodedTargets
+            .map((target) => {
+              try {
+                const parsedTargetCommand = parseCommandUri(target.commandUri);
+                return Number(parsedTargetCommand.args[1]);
+              } catch {
+                return Number.NaN;
+              }
+            })
+            .filter((line) => Number.isInteger(line));
+          const filteredTargetLines = targetLinesInOrder.filter((line) => scenario.previewSourceJumpLines.includes(line));
+
+          assert.deepStrictEqual(
+            filteredTargetLines,
+            scenario.previewSourceJumpLines,
+            `${scenario.fixtureName} should expose later preview source targets in the expected order`
+          );
+
+          for (const expectedLine of scenario.previewSourceJumpLines) {
+            const target = decodedTargets.find((candidate) => {
+              try {
+                const parsedTargetCommand = parseCommandUri(candidate.commandUri);
+                return Number(parsedTargetCommand.args[1]) === expectedLine;
+              } catch {
+                return false;
+              }
+            });
+            assert(target, `Expected a preview target for line ${expectedLine + 1}.`);
+
+            await openNonRobotEditor();
+            await executeCommandUri(target.commandUri);
+            await waitFor(
+              async () =>
+                vscode.window.activeTextEditor?.document?.uri.toString() === document.uri.toString() &&
+                vscode.window.activeTextEditor.selection.active.line === expectedLine,
+              `preview source target for line ${expectedLine + 1}`
+            );
+          }
+        });
+      }
     });
   }
 });

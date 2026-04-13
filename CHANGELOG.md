@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.57
+
+- Restored the Documentation Preview to a single continuous markdown render so nested lists and arrow lines keep the cleaner pre-`0.4.56` layout.
+- Kept the corrected later `#>> ->` source jumps by moving the precise click-target mapping into the preview DOM instead of splitting the markdown into separate rendered fragments.
+
+## 0.4.56
+
+- Fixed Documentation Preview source jumps for later `#>> ->` lines by rendering arrow lines as their own clickable preview items.
+- Added real VS Code regression coverage that executes the later preview source-target commands in the large adjustment fixture and verifies they land on the expected lines.
+
 ## 0.4.55
 
 - Added stronger checked-in VS Code folding regressions for the anonymized large Robot fixtures, including the new adjustment scenario.

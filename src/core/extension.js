@@ -3782,17 +3782,14 @@ class RobotDocPreviewViewProvider {
       display: block;
       padding-left: var(--robot-arrow-indent, 0ch);
     }
+    .preview .doc-clickable-line-group {
+      display: block;
+    }
     .preview pre {
       padding: 8px;
       overflow-x: auto;
       background: var(--vscode-textCodeBlock-background);
       border-radius: 4px;
-    }
-    .preview .doc-fragment {
-      margin-bottom: 1.2em;
-    }
-    .preview .doc-fragment:last-child {
-      margin-bottom: 0;
     }
     .preview .doc-clickable {
       cursor: pointer;
@@ -3880,6 +3877,59 @@ class RobotDocPreviewViewProvider {
         const blockSelector = 'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table';
         const wrapperSelector = 'div, section, article, main, body, ol, ul';
 
+        const ensureLineTargetSurfaces = (element) => {
+          if (!element || !(element instanceof HTMLElement)) {
+            return [];
+          }
+
+          if (element.dataset.docLineTargetsReady === 'true') {
+            return Array.from(element.children).filter(
+              (child) =>
+                child instanceof HTMLElement &&
+                (child.classList.contains('doc-clickable-line-group') ||
+                  child.classList.contains('robot-arrow-line'))
+            );
+          }
+
+          const lineNodes = Array.from(element.children).filter(
+            (child) => child instanceof HTMLElement && child.classList.contains('robot-render-line')
+          );
+          if (lineNodes.length === 0) {
+            return [];
+          }
+
+          element.dataset.docLineTargetsReady = 'true';
+          const surfaces = [];
+          let pendingGroup = [];
+
+          const flushPendingGroup = () => {
+            if (pendingGroup.length === 0) {
+              return;
+            }
+
+            const surface = document.createElement('span');
+            surface.className = 'doc-clickable-line-group';
+            element.insertBefore(surface, pendingGroup[0]);
+            for (const lineNode of pendingGroup) {
+              surface.appendChild(lineNode);
+            }
+            surfaces.push(surface);
+            pendingGroup = [];
+          };
+
+          for (const lineNode of lineNodes) {
+            if (lineNode.classList.contains('robot-arrow-line')) {
+              flushPendingGroup();
+              surfaces.push(lineNode);
+              continue;
+            }
+            pendingGroup.push(lineNode);
+          }
+
+          flushPendingGroup();
+          return surfaces;
+        };
+
         const collectTargetableBlocks = (container) => {
           if (!container || !(container instanceof HTMLElement)) {
             return [];
@@ -3892,13 +3942,29 @@ class RobotDocPreviewViewProvider {
             }
 
             if (child.matches(blockSelector)) {
-              blocks.push(child);
+              const lineSurfaces = ensureLineTargetSurfaces(child);
+              if (lineSurfaces.length > 0) {
+                blocks.push(...lineSurfaces);
+              } else if (child instanceof HTMLLIElement) {
+                blocks.push(ensureListItemClickableSurface(child));
+              } else {
+                blocks.push(child);
+              }
+
+              // Some block elements such as <li> can legitimately contain nested
+              // lists. We keep parent-first ordering, but still descend so deeper
+              // items remain independently clickable.
+              if (child instanceof HTMLLIElement) {
+                for (const nestedList of Array.from(child.children)) {
+                  if (nestedList instanceof HTMLElement && (nestedList.tagName === 'UL' || nestedList.tagName === 'OL')) {
+                    blocks.push(...collectTargetableBlocks(nestedList));
+                  }
+                }
+              }
+              continue;
             }
 
-            // Some block elements such as <li> can legitimately contain nested
-            // lists. We keep parent-first ordering, but still descend so deeper
-            // items remain independently clickable.
-            if (child.matches(wrapperSelector) || child.matches(blockSelector)) {
+            if (child.matches(wrapperSelector)) {
               blocks.push(...collectTargetableBlocks(child));
             }
           }
@@ -12701,6 +12767,10 @@ function isMarkdownListItemLine(line) {
   return /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(String(line || ""));
 }
 
+function isDocumentationArrowLine(line) {
+  return Boolean(parseArrowPrefix(String(line || "").trimStart()));
+}
+
 function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
   const sourceKind = String(fragment?.sourceKind || "documentation").trim().toLowerCase();
   if (sourceKind !== "inline") {
@@ -12747,6 +12817,7 @@ function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
     const sourceLine = Math.max(0, Number(entry?.sourceLine) || fragmentStartLine);
     const isHeading = Boolean(entry?.isHeading) || isMarkdownHeadingLine(text);
     const isListItem = isMarkdownListItemLine(text);
+    const isArrowLine = isDocumentationArrowLine(text);
 
     if (text.trim().length === 0) {
       flushParagraph();
@@ -12771,6 +12842,17 @@ function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
         createDocumentationRenderItem("list-item", [text], {
           commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
           label: `Open list item line ${sourceLine + 1}`
+        })
+      );
+      continue;
+    }
+
+    if (isArrowLine) {
+      flushParagraph();
+      items.push(
+        createDocumentationRenderItem("arrow-line", [text], {
+          commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+          label: `Open arrow line ${sourceLine + 1}`
         })
       );
       continue;

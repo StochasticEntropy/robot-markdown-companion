@@ -744,6 +744,8 @@ Case Two
   assert(renderedHtml.includes(encodeURIComponent(extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 5))));
   assert(renderedHtml.includes(encodeURIComponent(extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 11))));
   assert.strictEqual((renderedHtml.match(/<pre>/g) || []).length, 1);
+  assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
+  assert(!renderedHtml.includes("doc-fragment"));
   assert(!renderedHtml.includes('data-source-command="'));
   const targetMatch = renderedHtml.match(/data-doc-render-targets="([^"]+)"/);
   assert(targetMatch);
@@ -777,6 +779,8 @@ Case Nested
   assert(renderedHtml.includes("- first item"));
   assert(renderedHtml.includes("  - second item"));
   assert(renderedHtml.includes("    - third item"));
+  assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
+  assert(!renderedHtml.includes("doc-fragment"));
 
   const targetMatch = renderedHtml.match(/data-doc-render-targets="([^"]+)"/);
   assert(targetMatch);
@@ -804,7 +808,7 @@ async function runLargeFixtureRenderTargetTests() {
         { line: 30, kind: "list-item", labelFragment: "line 31" },
         { line: 33, kind: "list-item", labelFragment: "line 34" },
         { line: 84, kind: "list-item", labelFragment: "line 85" },
-        { line: 139, kind: "chunk", labelFragment: "line 140" }
+        { line: 139, kind: "arrow-line", labelFragment: "line 140" }
       ]
     },
     {
@@ -813,11 +817,15 @@ async function runLargeFixtureRenderTargetTests() {
         { line: 73, kind: "heading", labelFragment: "line 74" },
         { line: 74, kind: "heading", labelFragment: "line 75" },
         { line: 75, kind: "list-item", labelFragment: "line 76" },
-        { line: 162, kind: "chunk", labelFragment: "line 163" },
-        { line: 186, kind: "chunk", labelFragment: "line 187" },
+        { line: 162, kind: "arrow-line", labelFragment: "line 163" },
+        { line: 186, kind: "arrow-line", labelFragment: "line 187" },
+        { line: 199, kind: "arrow-line", labelFragment: "line 200" },
         { line: 205, kind: "heading", labelFragment: "line 206" },
+        { line: 206, kind: "arrow-line", labelFragment: "line 207" },
+        { line: 207, kind: "arrow-line", labelFragment: "line 208" },
+        { line: 238, kind: "arrow-line", labelFragment: "line 239" },
         { line: 311, kind: "heading", labelFragment: "line 312" },
-        { line: 333, kind: "chunk", labelFragment: "line 334" }
+        { line: 333, kind: "arrow-line", labelFragment: "line 334" }
       ]
     }
   ];
@@ -832,6 +840,8 @@ async function runLargeFixtureRenderTargetTests() {
     assert.strictEqual(parsed.blocks.length, 1, `${fixture.fixtureName} should parse as a single target block`);
 
     const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), parsed.blocks[0]);
+    assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
+    assert(!renderedHtml.includes("doc-fragment"));
     const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
 
     for (const expectedTarget of fixture.expectedTargets) {
