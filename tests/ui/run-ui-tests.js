@@ -8,9 +8,6 @@ async function main() {
   const extensionTestsPath = path.resolve(__dirname, "suite/index.js");
   const fixturesDirectoryPath = path.resolve(__dirname, "../fixtures");
   const fixtureNames = fs.readdirSync(fixturesDirectoryPath).filter((entry) => entry.endsWith(".robot"));
-  const additionalFixturePaths = [path.join(extensionDevelopmentPath, "LeistungEinweisungTRB.robot")].filter((entry) =>
-    fs.existsSync(entry)
-  );
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "robot-companion-ui-"));
   let shouldCleanup = true;
 
@@ -18,11 +15,6 @@ async function main() {
     const fixturePath = path.join(fixturesDirectoryPath, fixtureName);
     const workspaceFixturePath = path.join(workspacePath, fixtureName);
     fs.copyFileSync(fixturePath, workspaceFixturePath);
-  }
-
-  for (const additionalFixturePath of additionalFixturePaths) {
-    const workspaceFixturePath = path.join(workspacePath, path.basename(additionalFixturePath));
-    fs.copyFileSync(additionalFixturePath, workspaceFixturePath);
   }
 
   try {

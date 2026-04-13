@@ -8,20 +8,10 @@ const FIXTURE_SCENARIOS = [
     fixtureName: "folding-regression.robot",
     label: "testcase owner",
     ownerLine: 1,
-    headlineRanges: [
-      { start: 3, end: 9 },
-      { start: 10, end: 13 }
-    ],
     headlineMarkerLine: 2,
     headlineNextVisibleLine: 9,
-    firstLevelRanges: [
-      { start: 4, end: 7 },
-      { start: 8, end: 9 },
-      { start: 11, end: 13 }
-    ],
     firstLevelMarkerLine: 3,
     firstLevelNextVisibleLine: 7,
-    secondLevelRanges: [{ start: 6, end: 7 }],
     secondLevelMarkerLine: 5,
     secondLevelNextVisibleLine: 7
   },
@@ -29,50 +19,21 @@ const FIXTURE_SCENARIOS = [
     fixtureName: "folding-regression-keywords.robot",
     label: "keyword owner",
     ownerLine: 1,
-    headlineRanges: [
-      { start: 3, end: 9 },
-      { start: 10, end: 13 }
-    ],
     headlineMarkerLine: 2,
     headlineNextVisibleLine: 9,
-    firstLevelRanges: [
-      { start: 4, end: 7 },
-      { start: 8, end: 9 },
-      { start: 11, end: 13 }
-    ],
     firstLevelMarkerLine: 3,
     firstLevelNextVisibleLine: 7,
-    secondLevelRanges: [{ start: 6, end: 7 }],
     secondLevelMarkerLine: 5,
     secondLevelNextVisibleLine: 7
   },
   {
-    fixtureName: "LeistungEinweisungTRB.robot",
+    fixtureName: "folding-regression-large.robot",
     label: "large testcase owner",
     ownerLine: 10,
-    headlineRanges: [
-      { start: 28, end: 29 },
-      { start: 30, end: 41 },
-      { start: 42, end: 74 },
-      { start: 75, end: 160 }
-    ],
     headlineMarkerLine: 27,
     headlineNextVisibleLine: 29,
-    firstLevelRanges: [
-      { start: 31, end: 33 },
-      { start: 34, end: 40 },
-      { start: 43, end: 57 },
-      { start: 59, end: 73 },
-      { start: 80, end: 97 },
-      { start: 98, end: 138 },
-      { start: 139, end: 160 }
-    ],
     firstLevelMarkerLine: 30,
     firstLevelNextVisibleLine: 33,
-    secondLevelRanges: [
-      { start: 85, end: 96 },
-      { start: 140, end: 159 }
-    ],
     secondLevelMarkerLine: 84,
     secondLevelNextVisibleLine: 96
   }
@@ -101,32 +62,6 @@ async function waitFor(predicate, description, timeoutMs = 8000, intervalMs = 50
     throw lastError;
   }
   throw new Error(`Timed out waiting for ${description}.`);
-}
-
-function normalizeFoldingRanges(ranges) {
-  return (Array.isArray(ranges) ? ranges : []).map((range) => ({
-    start: Number(range?.start) || 0,
-    end: Number(range?.end) || 0
-  }));
-}
-
-async function getFoldingRanges(document) {
-  const ranges = await vscode.commands.executeCommand("_executeFoldingRangeProvider", document.uri);
-  return normalizeFoldingRanges(ranges);
-}
-
-async function waitForFoldingRanges(document, expectedRanges, label) {
-  const expectedSerialized = JSON.stringify(expectedRanges);
-  let lastRanges = [];
-  try {
-    await waitFor(async () => {
-      lastRanges = await getFoldingRanges(document);
-      return JSON.stringify(lastRanges) === expectedSerialized;
-    }, label);
-  } catch (error) {
-    const detail = `Expected ${expectedSerialized}, last actual ${JSON.stringify(lastRanges)}.`;
-    throw new Error(`${error.message} ${detail}`);
-  }
 }
 
 async function setCursor(editor, line, character = 0) {

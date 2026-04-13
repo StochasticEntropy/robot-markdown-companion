@@ -62,12 +62,6 @@ function loadExtensionModule() {
           appendText() {}
         },
         Range: class {},
-        Position: class {
-          constructor(line, character) {
-            this.line = line;
-            this.character = character;
-          }
-        },
         Hover: class {},
         FoldingRange: class {
           constructor(start, end, kind) {
@@ -80,14 +74,6 @@ function loadExtensionModule() {
         CodeLens: class {},
         TreeItem: class {},
         ThemeIcon: class {},
-        Selection: class {
-          constructor(start, end) {
-            this.start = start;
-            this.end = end;
-            this.anchor = start;
-            this.active = end;
-          }
-        },
         CompletionItemKind: {
           Field: 5,
           Variable: 6,
@@ -138,7 +124,6 @@ const workerTestApi = workerModule.__test__;
 
 function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
   const text = String(source || "").replace(/^\n/, "");
-  const lines = text.split(/\r?\n/);
   return {
     uri: {
       toString: () => `file://${filePath}`,
@@ -146,10 +131,6 @@ function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
       path: filePath
     },
     version: 1,
-    lineCount: lines.length,
-    lineAt: (line) => ({
-      text: lines[Math.max(0, Math.min(lines.length - 1, Number(line) || 0))] || ""
-    }),
     getText: () => text
   };
 }
