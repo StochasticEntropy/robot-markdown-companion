@@ -59,11 +59,33 @@ function loadExtensionModule() {
           dispose() {}
         },
         MarkdownString: class {
-          appendMarkdown() {}
-          appendText() {}
+          constructor() {
+            this.value = "";
+            this.isTrusted = false;
+            this.supportHtml = false;
+          }
+          appendMarkdown(value) {
+            this.value += String(value || "");
+          }
+          appendText(value) {
+            this.value += String(value || "");
+          }
+          appendCodeblock(value, language = "") {
+            this.value += `\`\`\`${language}\n${String(value || "")}\n\`\`\``;
+          }
         },
-        Range: class {},
-        Hover: class {},
+        Range: class {
+          constructor(startLine, startCharacter, endLine, endCharacter) {
+            this.start = { line: startLine, character: startCharacter };
+            this.end = { line: endLine, character: endCharacter };
+          }
+        },
+        Hover: class {
+          constructor(contents, range) {
+            this.contents = Array.isArray(contents) ? contents : [contents];
+            this.range = range;
+          }
+        },
         FoldingRange: class {
           constructor(start, end, kind) {
             this.start = start;
@@ -125,6 +147,7 @@ const workerTestApi = workerModule.__test__;
 
 function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
   const text = String(source || "").replace(/^\n/, "");
+  const lines = text.split(/\r?\n/);
   return {
     uri: {
       toString: () => `file://${filePath}`,
@@ -132,7 +155,11 @@ function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
       path: filePath
     },
     version: 1,
-    getText: () => text
+    lineCount: lines.length,
+    getText: () => text,
+    lineAt: (index) => ({
+      text: lines[index] || ""
+    })
   };
 }
 
@@ -824,8 +851,9 @@ async function runLargeFixtureRenderTargetTests() {
         { line: 206, kind: "arrow-line", labelFragment: "line 207" },
         { line: 207, kind: "arrow-line", labelFragment: "line 208" },
         { line: 238, kind: "arrow-line", labelFragment: "line 239" },
-        { line: 311, kind: "heading", labelFragment: "line 312" },
-        { line: 333, kind: "arrow-line", labelFragment: "line 334" }
+        { line: 267, kind: "heading", labelFragment: "line 268" },
+        { line: 268, kind: "list-item", labelFragment: "line 269" },
+        { line: 311, kind: "heading", labelFragment: "line 312" }
       ]
     }
   ];
@@ -860,6 +888,86 @@ async function runLargeFixtureRenderTargetTests() {
       );
     }
   }
+}
+
+function runRobot7VarAssignmentHoverTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Var Assignment
+    VAR    \${plainDate}    2022-01-01
+    VAR    \${typedDate: date}    2022-01-02
+    \${typedFromSet: date}=    Set Variable    2022-01-03
+    Log    \${plainDate}
+    Log    \${typedDate}
+    Log    \${typedFromSet}
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+
+  assert.deepStrictEqual(
+    parsed.variableAssignments.map((assignment) => ({
+      variableToken: assignment.variableToken,
+      normalizedVariable: assignment.normalizedVariable,
+      sourceLabel: assignment.sourceLabel,
+      startLine: assignment.startLine
+    })),
+    [
+      {
+        variableToken: "${plainDate}",
+        normalizedVariable: extensionTestApi.normalizeVariableLookupToken("${plainDate}"),
+        sourceLabel: "VAR",
+        startLine: 2
+      },
+      {
+        variableToken: "${typedDate: date}",
+        normalizedVariable: extensionTestApi.normalizeVariableLookupToken("${typedDate}"),
+        sourceLabel: "VAR",
+        startLine: 3
+      },
+      {
+        variableToken: "${typedFromSet: date}",
+        normalizedVariable: extensionTestApi.normalizeVariableLookupToken("${typedFromSet}"),
+        sourceLabel: "Set Variable",
+        startLine: 4
+      }
+    ]
+  );
+
+  const typedVarHover = extensionTestApi.createVariableValueHover(
+    document,
+    parsed,
+    {
+      line: 6,
+      character: document.lineAt(6).text.indexOf("${typedDate}") + 3
+    }
+  );
+  assert(typedVarHover, "expected hover for Robot 7 typed VAR assignment");
+  assert.strictEqual(typedVarHover.contents.length, 1);
+  assert.match(typedVarHover.contents[0].value, /2022-01-02/);
+  assert.match(typedVarHover.contents[0].value, /\*\*Source:\*\* `VAR` at line 4/);
+
+  const typedSetVariableHover = extensionTestApi.createVariableValueHover(
+    document,
+    parsed,
+    {
+      line: 7,
+      character: document.lineAt(7).text.indexOf("${typedFromSet}") + 3
+    }
+  );
+  assert(typedSetVariableHover, "expected hover for typed Set Variable assignment");
+  assert.strictEqual(typedSetVariableHover.contents.length, 1);
+  assert.match(typedSetVariableHover.contents[0].value, /2022-01-03/);
+  assert.match(typedSetVariableHover.contents[0].value, /\*\*Source:\*\* `Set Variable` at line 5/);
+
+  const namedArgumentCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    "${typedDate}",
+    parsed,
+    6
+  );
+  assert.strictEqual(namedArgumentCurrentValue.value, "2022-01-02");
+  assert.strictEqual(namedArgumentCurrentValue.source, "local-variable");
+  assert.strictEqual(namedArgumentCurrentValue.sourceLabel, "VAR");
+  assert.strictEqual(namedArgumentCurrentValue.sourceLine, 3);
 }
 
 function runDocumentationFoldingTests() {
@@ -1089,6 +1197,13 @@ Case TieredClassicDoc
   const secondLevelRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 3);
   assert.deepStrictEqual(secondLevelRanges, [{ startLine: 8, endLine: 9 }]);
 
+  const stepRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 4);
+  assert.deepStrictEqual(stepRanges, [
+    { startLine: 5, endLine: 10 },
+    { startLine: 8, endLine: 9 },
+    { startLine: 11, endLine: 13 }
+  ]);
+
   assert.deepStrictEqual(
     extensionTestApi.buildDocumentationOverviewRanges(parsed.blocks),
     [
@@ -1141,6 +1256,13 @@ Keyword TieredClassicDoc
 
   const secondLevelRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 3);
   assert.deepStrictEqual(secondLevelRanges, [{ startLine: 8, endLine: 9 }]);
+
+  const stepRanges = extensionTestApi.buildDocumentationBodyFoldingRanges(parsed.blocks, 4);
+  assert.deepStrictEqual(stepRanges, [
+    { startLine: 5, endLine: 10 },
+    { startLine: 8, endLine: 9 },
+    { startLine: 11, endLine: 13 }
+  ]);
 }
 
 function runDocumentationPreviewActionLinkTests() {
@@ -1148,11 +1270,11 @@ function runDocumentationPreviewActionLinkTests() {
   const encodedArgs = encodeURIComponent(JSON.stringify([documentUri]));
   const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToHeadlines\\?${encodedArgs}`));
-  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToFirstLevel\\?${encodedArgs}`));
-  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSecondLevel\\?${encodedArgs}`));
-  assert.match(previewActions, />Level 3</);
-  assert.match(previewActions, />Level 4</);
-  assert.match(previewActions, />Level 5</);
+  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSteps\\?${encodedArgs}`));
+  assert.match(previewActions, />Headlines</);
+  assert.match(previewActions, />Steps</);
+  assert.doesNotMatch(previewActions, /foldDocumentationToFirstLevel/);
+  assert.doesNotMatch(previewActions, /foldDocumentationToSecondLevel/);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.unfoldDocumentation\\?${encodedArgs}`));
   assert.strictEqual(extensionTestApi.buildDocumentationPreviewActionsHtml(""), "");
 }
@@ -1189,6 +1311,7 @@ async function main() {
   await runInlineDocumentationTests();
   await runIndentedInlineDocumentationTests();
   await runLargeFixtureRenderTargetTests();
+  runRobot7VarAssignmentHoverTests();
   runDocumentationFoldingTests();
   runDocumentationBodyFoldingTests();
   runKeywordDocumentationBodyFoldingTests();

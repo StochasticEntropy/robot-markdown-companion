@@ -15,6 +15,7 @@ const CMD_PREVIEW_KEYWORD_ARGUMENT = "robotCompanion.previewKeywordArgument";
 const CMD_SHOW_OUTPUT = "robotCompanion.showOutput";
 const CMD_USE_AS_DEFAULT_FOLDING_PROVIDER = "robotCompanion.useAsDefaultFoldingProvider";
 const CMD_FOLD_DOCUMENTATION_TO_HEADLINES = "robotCompanion.foldDocumentationToHeadlines";
+const CMD_FOLD_DOCUMENTATION_TO_STEPS = "robotCompanion.foldDocumentationToSteps";
 const CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL = "robotCompanion.foldDocumentationToFirstLevel";
 const CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL = "robotCompanion.foldDocumentationToSecondLevel";
 const CMD_UNFOLD_DOCUMENTATION = "robotCompanion.unfoldDocumentation";
@@ -24,7 +25,8 @@ const ROBOT_COMPANION_EXTENSION_ID = "StochasticEntropy.robot-markdown-companion
 const DOCUMENTATION_BODY_FOLD_TIER = Object.freeze({
   HEADLINES: 1,
   FIRST_LEVEL: 2,
-  SECOND_LEVEL: 3
+  SECOND_LEVEL: 3,
+  STEPS: 4
 });
 const DOCUMENTATION_FOLDING_REFRESH_DELAY_MS = 20;
 let activeDocumentationBodyFoldState = {
@@ -308,7 +310,7 @@ function normalizeDocumentationBodyFoldTier(tier) {
   }
 
   return Math.min(
-    DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL,
+    DOCUMENTATION_BODY_FOLD_TIER.STEPS,
     Math.max(DOCUMENTATION_BODY_FOLD_TIER.HEADLINES, Math.trunc(numericTier))
   );
 }
@@ -322,7 +324,13 @@ function buildDocumentationBodyFoldingRanges(blocks, targetTier = null) {
     const normalizedCandidates = normalizeDocumentationFoldingCandidates(getDocumentationFoldingCandidates(block));
     for (const candidate of normalizedCandidates) {
       const currentTier = normalizeDocumentationBodyFoldTier(getDocumentationBodyFoldTierForCandidate(candidate));
-      if (normalizedTargetTier !== null && normalizedTargetTier !== currentTier) {
+      const shouldInclude =
+        normalizedTargetTier === null ||
+        normalizedTargetTier === currentTier ||
+        (normalizedTargetTier === DOCUMENTATION_BODY_FOLD_TIER.STEPS &&
+          (currentTier === DOCUMENTATION_BODY_FOLD_TIER.FIRST_LEVEL ||
+            currentTier === DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL));
+      if (!shouldInclude) {
         continue;
       }
       pushDocumentationFoldingRange(ranges, seenKeys, candidate.startLine, candidate.endLine);
@@ -1012,13 +1020,19 @@ function activate(context) {
         );
       }
     }),
+    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_STEPS, async (documentUri) => {
+      try {
+        await setDocumentationExactFoldState(foldingRangeProvider, DOCUMENTATION_BODY_FOLD_TIER.STEPS, documentUri);
+      } catch (error) {
+        logRobotCompanionError("Failed to fold documentation to steps", error);
+        await vscode.window.showErrorMessage(
+          "Robot Companion could not fold documentation to steps. See the Robot Companion output for details."
+        );
+      }
+    }),
     vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL, async (documentUri) => {
       try {
-        await setDocumentationExactFoldState(
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.FIRST_LEVEL,
-          documentUri
-        );
+        await setDocumentationExactFoldState(foldingRangeProvider, DOCUMENTATION_BODY_FOLD_TIER.STEPS, documentUri);
       } catch (error) {
         logRobotCompanionError("Failed to fold documentation to level 4", error);
         await vscode.window.showErrorMessage(
@@ -1028,11 +1042,7 @@ function activate(context) {
     }),
     vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL, async (documentUri) => {
       try {
-        await setDocumentationExactFoldState(
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL,
-          documentUri
-        );
+        await setDocumentationExactFoldState(foldingRangeProvider, DOCUMENTATION_BODY_FOLD_TIER.STEPS, documentUri);
       } catch (error) {
         logRobotCompanionError("Failed to fold documentation to level 5", error);
         await vscode.window.showErrorMessage(
@@ -4271,16 +4281,13 @@ function buildDocumentationPreviewActionsHtml(documentUri) {
 
   const commandArgs = encodeURIComponent(JSON.stringify([String(documentUri)]));
   const foldDocumentationHeadlinesCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_HEADLINES}?${commandArgs}`;
-  const foldDocumentationFirstLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL}?${commandArgs}`;
-  const foldDocumentationSecondLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL}?${commandArgs}`;
+  const foldDocumentationStepsCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_STEPS}?${commandArgs}`;
   const unfoldDocumentationCommand = `command:${CMD_UNFOLD_DOCUMENTATION}?${commandArgs}`;
   return `<div class=\"preview-actions\">
           <span class=\"preview-actions-label\">Fold To:</span>
-          <a href=\"${foldDocumentationHeadlinesCommand}\">Level 3</a>
+          <a href=\"${foldDocumentationHeadlinesCommand}\">Headlines</a>
           <span class=\"preview-actions-separator\">|</span>
-          <a href=\"${foldDocumentationFirstLevelCommand}\">Level 4</a>
-          <span class=\"preview-actions-separator\">|</span>
-          <a href=\"${foldDocumentationSecondLevelCommand}\">Level 5</a>
+          <a href=\"${foldDocumentationStepsCommand}\">Steps</a>
           <span class=\"preview-actions-separator\">|</span>
           <a href=\"${unfoldDocumentationCommand}\">Unfold</a>
         </div>`;
@@ -4655,6 +4662,7 @@ class RobotReturnPreviewViewProvider {
     const hasCurrentValueSourceLine =
       Number.isFinite(Number(this._state.currentValueSourceLine)) &&
       Number(this._state.currentValueSourceLine) >= 0;
+    const currentValueSourceLabel = getLocalVariableAssignmentSourceLabel(this._state);
     const currentValueSourceLineNumber = hasCurrentValueSourceLine
       ? Number(this._state.currentValueSourceLine) + 1
       : undefined;
@@ -4667,9 +4675,9 @@ class RobotReturnPreviewViewProvider {
           <div class=\"current-value-title\">Resolved current value</div>
           <div class=\"current-value-content\"><code>${escapeHtml(this._state.currentValue)}</code></div>
           ${
-            String(this._state.currentValueSource || "").toLowerCase() === "set-variable" && hasCurrentValueSourceLine
+            isLocalVariableCurrentValueSource(this._state.currentValueSource) && hasCurrentValueSourceLine
               ? `<div class=\"current-value-source\">
-                  From <code>Set Variable</code> line ${currentValueSourceLineNumber}
+                  From <code>${escapeHtml(currentValueSourceLabel)}</code> line ${currentValueSourceLineNumber}
                   ${
                     currentValueSourceCommand
                       ? `&nbsp;&middot;&nbsp;<a href=\"${currentValueSourceCommand}\">Jump to assignment</a>`
@@ -4992,6 +5000,7 @@ class RobotReturnExplorerController {
       returnAnnotation: "",
       currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
       currentValueSource: enumContext.currentValueSource || "",
+      currentValueSourceLabel: enumContext.currentValueSourceLabel || "",
       currentValueSourceLine: enumContext.currentValueSourceLine,
       sourceUri: "",
       sourceLine: undefined,
@@ -5154,6 +5163,7 @@ class RobotReturnExplorerController {
         returnAnnotation: "",
         currentValue: String(enumContext.currentValue || enumContext.argumentValue || ""),
         currentValueSource: enumContext.currentValueSource || "",
+        currentValueSourceLabel: enumContext.currentValueSourceLabel || "",
         currentValueSourceLine: enumContext.currentValueSourceLine,
         sourceUri: "",
         sourceLine: undefined,
@@ -5891,15 +5901,16 @@ function buildEnumPreviewMarkdown(context) {
 
   if (
     showResolvedCurrentValue &&
-    context.currentValueSource === "set-variable" &&
+    isLocalVariableCurrentValueSource(context.currentValueSource) &&
     Number.isFinite(Number(context.currentValueSourceLine)) &&
     Number(context.currentValueSourceLine) >= 0
   ) {
     const sourceLineNumber = Number(context.currentValueSourceLine) + 1;
-    lines.push(`Resolved from local \`Set Variable\` at line ${sourceLineNumber}.`);
+    const currentValueSourceLabel = getLocalVariableAssignmentSourceLabel(context);
+    lines.push(`Resolved from local \`${currentValueSourceLabel}\` at line ${sourceLineNumber}.`);
     const setVariableCommand = buildOpenLocationCommandUri(context.documentUri, Number(context.currentValueSourceLine));
     if (setVariableCommand) {
-      lines.push(`[Jump to Set Variable line ${sourceLineNumber}](${setVariableCommand})`);
+      lines.push(`[Jump to ${currentValueSourceLabel} line ${sourceLineNumber}](${setVariableCommand})`);
     }
     lines.push("");
   }
@@ -5979,7 +5990,7 @@ function buildEnumPreviewMarkdown(context) {
       const sourceLineNumber = sourceLine + 1;
       lines.push(`Set at line: \`${sourceLineNumber}\``);
       const shouldSuppressReturnHintJump =
-        String(context.currentValueSource || "").toLowerCase() === "set-variable" &&
+        isLocalVariableCurrentValueSource(context.currentValueSource) &&
         Number.isFinite(Number(context.currentValueSourceLine)) &&
         Number(context.currentValueSourceLine) >= 0 &&
         sourceLine === Number(context.currentValueSourceLine);
@@ -6023,7 +6034,7 @@ function isRedundantReturnHint(context) {
     .toLowerCase();
   return (
     Boolean(context?.returnHintContext) &&
-    String(context?.currentValueSource || "").toLowerCase() === "set-variable" &&
+    isLocalVariableCurrentValueSource(context?.currentValueSource) &&
     Number.isFinite(returnHintSourceLine) &&
     returnHintSourceLine >= 0 &&
     Number.isFinite(currentValueSourceLine) &&
@@ -6894,6 +6905,7 @@ function createEmptyReturnPreviewState(infoMessage = "") {
     returnAnnotation: "",
     currentValue: "",
     currentValueSource: "",
+    currentValueSourceLabel: "",
     currentValueSourceLine: undefined,
     sourceUri: "",
     sourceLine: undefined,
@@ -6915,6 +6927,7 @@ function createReturnLoadingPreviewState(fileName, variableContext) {
     returnAnnotation: "",
     currentValue: "",
     currentValueSource: "",
+    currentValueSourceLabel: "",
     currentValueSourceLine: undefined,
     sourceUri: "",
     sourceLine: undefined,
@@ -6978,7 +6991,7 @@ function parseVariableAssignments(lines, ownerByLine) {
       continue;
     }
 
-    const assignment = parseSetVariableAssignment(lines, lineIndex);
+    const assignment = parseLocalVariableAssignment(lines, lineIndex);
     if (!assignment) {
       continue;
     }
@@ -7125,12 +7138,93 @@ function parseSetVariableAssignment(lines, lineIndex) {
   return {
     id: `${lineIndex}:${variableToken}`,
     variableToken,
-    normalizedVariable: normalizeVariableToken(variableToken),
+    normalizedVariable: normalizeVariableLookupToken(variableToken),
     valueRaw: valueLines.join("\n"),
+    sourceLabel: "Set Variable",
     startLine: lineIndex,
     endLine,
     range: new vscode.Range(lineIndex, 0, endLine, lines[endLine] ? lines[endLine].length : 0)
   };
+}
+
+function parseVarAssignment(lines, lineIndex) {
+  const line = String(lines[lineIndex] || "");
+  const trimmed = line.trimStart();
+  if (!/^VAR(?:\s{2,}|\t+)/.test(trimmed)) {
+    return null;
+  }
+
+  const cells = trimmed.split(/\s{2,}|\t+/);
+  if (cells.length < 2) {
+    return null;
+  }
+
+  let cursor = 1;
+  let variableToken = "";
+  const variableCell = String(cells[cursor] || "").trim();
+  const variableWithEqualsMatch = variableCell.match(/^([@$&%]\{[^}\r\n]+\})\s*=$/);
+  if (variableWithEqualsMatch) {
+    variableToken = variableWithEqualsMatch[1];
+    cursor += 1;
+  } else if (/^[@$&%]\{[^}\r\n]+\}$/.test(variableCell)) {
+    variableToken = variableCell;
+    cursor += 1;
+    while (cursor < cells.length && String(cells[cursor] || "").trim() === "=") {
+      cursor += 1;
+    }
+  } else {
+    return null;
+  }
+
+  const valueCells = [];
+  while (cursor < cells.length) {
+    const cell = String(cells[cursor] || "");
+    const trimmedCell = cell.trim();
+    cursor += 1;
+    if (!trimmedCell) {
+      continue;
+    }
+    if (trimmedCell.startsWith("#")) {
+      break;
+    }
+    if (/^scope=/i.test(trimmedCell)) {
+      continue;
+    }
+    valueCells.push(stripInlineRobotComment(cell));
+  }
+
+  const valueLines = [];
+  if (valueCells.length > 0) {
+    valueLines.push(valueCells.join("    "));
+  }
+
+  let endLine = lineIndex;
+  for (let nextLine = lineIndex + 1; nextLine < lines.length; nextLine += 1) {
+    const continuation = parseContinuationLine(lines[nextLine]);
+    if (!continuation.isContinuation) {
+      break;
+    }
+    const continuationText = stripInlineRobotComment(continuation.text);
+    if (!/^scope=/i.test(continuationText.trim())) {
+      valueLines.push(continuationText);
+    }
+    endLine = nextLine;
+  }
+
+  return {
+    id: `${lineIndex}:${variableToken}`,
+    variableToken,
+    normalizedVariable: normalizeVariableLookupToken(variableToken),
+    valueRaw: valueLines.join("\n"),
+    sourceLabel: "VAR",
+    startLine: lineIndex,
+    endLine,
+    range: new vscode.Range(lineIndex, 0, endLine, lines[endLine] ? lines[endLine].length : 0)
+  };
+}
+
+function parseLocalVariableAssignment(lines, lineIndex) {
+  return parseVarAssignment(lines, lineIndex) || parseSetVariableAssignment(lines, lineIndex);
 }
 
 function createVariableValueHover(document, parsed, position, runtimeCacheService) {
@@ -7170,6 +7264,7 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
   const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
   const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
   const currentValueSummary = shownLines.length > 0 ? shownLines[0] : "";
+  const assignmentSourceLabel = getLocalVariableAssignmentSourceLabel(selectedAssignment);
 
   const markdown = new vscode.MarkdownString();
   markdown.isTrusted = {
@@ -7190,10 +7285,12 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
   markdown.appendMarkdown("**Owner:** ");
   markdown.appendText(owner.name);
   markdown.appendMarkdown("  \n");
-  markdown.appendMarkdown(`**Source:** \`Set Variable\` at line ${selectedAssignment.startLine + 1}  \n`);
+  markdown.appendMarkdown(`**Source:** \`${escapeMarkdownInline(assignmentSourceLabel)}\` at line ${selectedAssignment.startLine + 1}  \n`);
   const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), selectedAssignment.startLine);
   if (sourceCommand) {
-    markdown.appendMarkdown(`[Jump to Set Variable line ${selectedAssignment.startLine + 1}](${sourceCommand})\n\n`);
+    markdown.appendMarkdown(
+      `[Jump to ${escapeMarkdownInline(assignmentSourceLabel)} line ${selectedAssignment.startLine + 1}](${sourceCommand})\n\n`
+    );
   } else {
     markdown.appendMarkdown("\n");
   }
@@ -7512,7 +7609,8 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, 
   const fallback = {
     value: rawValue,
     source: "argument",
-    sourceLine: undefined
+    sourceLine: undefined,
+    sourceLabel: ""
   };
 
   if (!rawValue || !/^[@$&%]\{[^}\r\n]+\}$/.test(rawValue)) {
@@ -7544,7 +7642,8 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, 
 
   return {
     value: resolvedValue,
-    source: "set-variable",
+    source: "local-variable",
+    sourceLabel: getLocalVariableAssignmentSourceLabel(selectedAssignment),
     sourceLine: selectedAssignment.startLine,
     assignment: selectedAssignment
   };
@@ -10156,6 +10255,16 @@ function normalizeVariableToken(variableToken) {
   return String(variableToken || "").trim().toLowerCase();
 }
 
+function isLocalVariableCurrentValueSource(source) {
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  return normalizedSource === "local-variable" || normalizedSource === "set-variable";
+}
+
+function getLocalVariableAssignmentSourceLabel(source) {
+  const label = String(source?.sourceLabel || source?.currentValueSourceLabel || "").trim();
+  return label || "Set Variable";
+}
+
 function getVariableRootToken(variableToken) {
   const source = String(variableToken || "").trim();
   const match = source.match(/^([@$&%]\{)([^}\r\n]+)\}$/);
@@ -10169,7 +10278,11 @@ function getVariableRootToken(variableToken) {
     return source;
   }
 
-  const root = body.split(/[.\[]/, 1)[0].trim();
+  let root = body.split(/[.\[]/, 1)[0].trim();
+  const typedRootMatch = root.match(/^(.*?)\s*:\s+.+$/);
+  if (typedRootMatch) {
+    root = String(typedRootMatch[1] || "").trim();
+  }
   if (!root) {
     return source;
   }
@@ -10266,16 +10379,17 @@ async function createEnumValueHover(
     markdown.appendMarkdown("  \n");
   }
   if (
-    context.currentValueSource === "set-variable" &&
+    isLocalVariableCurrentValueSource(context.currentValueSource) &&
     Number.isFinite(Number(context.currentValueSourceLine)) &&
     Number(context.currentValueSourceLine) >= 0
   ) {
     const sourceLineNumber = Number(context.currentValueSourceLine) + 1;
+    const currentValueSourceLabel = getLocalVariableAssignmentSourceLabel(context);
     markdown.appendMarkdown("**Value source:** ");
-    markdown.appendMarkdown(`\`Set Variable\` line ${sourceLineNumber}`);
+    markdown.appendMarkdown(`\`${escapeMarkdownInline(currentValueSourceLabel)}\` line ${sourceLineNumber}`);
     const setVariableCommand = buildOpenLocationCommandUri(context.documentUri, Number(context.currentValueSourceLine));
     if (setVariableCommand) {
-      markdown.appendMarkdown(`  \n[Jump to Set Variable line ${sourceLineNumber}](${setVariableCommand})`);
+      markdown.appendMarkdown(`  \n[Jump to ${escapeMarkdownInline(currentValueSourceLabel)} line ${sourceLineNumber}](${setVariableCommand})`);
     }
     markdown.appendMarkdown("\n\n");
   }
@@ -10359,7 +10473,7 @@ async function createEnumValueHover(
         sourceLine
       );
       const shouldSuppressReturnHintJump =
-        String(context.currentValueSource || "").toLowerCase() === "set-variable" &&
+        isLocalVariableCurrentValueSource(context.currentValueSource) &&
         Number.isFinite(Number(context.currentValueSourceLine)) &&
         Number(context.currentValueSourceLine) >= 0 &&
         sourceLine === Number(context.currentValueSourceLine);
@@ -10582,6 +10696,7 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
     normalizedArgument,
     currentValue,
     currentValueSource: currentValueResolution.source,
+    currentValueSourceLabel: currentValueResolution.sourceLabel || "",
     currentValueSourceLine: currentValueResolution.sourceLine,
     showArgumentAssignment: options.showArgumentAssignment !== false,
     showResolvedCurrentValue: options.showResolvedCurrentValue !== false,
@@ -13560,6 +13675,9 @@ module.exports = {
     buildDocumentationOverviewRanges,
     renderDocumentationBlockHtml,
     buildOpenLocationCommandUri,
+    createVariableValueHover,
+    normalizeVariableLookupToken,
+    resolveNamedArgumentCurrentValueFromSetVariable,
     parseStructuredTypesFromPythonSource,
     finalizeStructuredTypeCamelCaseAccess,
     buildEnumPreviewMarkdown

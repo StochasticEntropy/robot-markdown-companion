@@ -111,14 +111,13 @@ const FIXTURE_SCENARIOS = [
     fixtureName: "folding-regression-adjustment.robot",
     label: "large adjustment testcase owner",
     ownerLine: 13,
-    previewSourceJumpLines: [162, 186, 199, 206, 207, 238, 333],
+    previewSourceJumpLines: [162, 186, 199, 206, 207, 238],
     expectedBodyRanges: {
       headline: [
         [74, 156],
         [157, 204],
         [205, 266],
-        [267, 310],
-        [311, 349]
+        [267, 310]
       ],
       firstLevel: [
         [75, 88],
@@ -129,15 +128,13 @@ const FIXTURE_SCENARIOS = [
         [185, 193],
         [194, 197],
         [198, 203],
-        [268, 309],
-        [328, 349]
+        [268, 309]
       ],
       secondLevel: [
         [162, 176],
         [186, 192],
         [199, 202],
-        [238, 265],
-        [333, 348]
+        [238, 265]
       ]
     },
     headlineCursorJumps: [
@@ -164,7 +161,8 @@ const FIXTURE_SCENARIOS = [
     secondLevelCursorJumps: [
       { from: 162, to: 177 },
       { from: 186, to: 193 },
-      { from: 199, to: 205 }
+      { from: 199, to: 205 },
+      { from: 238, to: 267 }
     ]
   }
 ];
@@ -299,9 +297,14 @@ function extendExpectedRangesAcrossBlankLines(document, expectedRanges) {
     });
   const documentLastLine = Math.max(0, Number(document?.lineCount) - 1);
 
-  return sourceRanges.map((currentRange, index) => {
-    const nextRange = sourceRanges[index + 1];
-    const nextBlockingStartLine = nextRange ? nextRange[0] : documentLastLine + 1;
+  return sourceRanges.map((currentRange) => {
+    let nextBlockingStartLine = documentLastLine + 1;
+    for (const candidateRange of sourceRanges) {
+      if (candidateRange[0] > currentRange[1]) {
+        nextBlockingStartLine = candidateRange[0];
+        break;
+      }
+    }
     let expandedEndLine = currentRange[1];
 
     while (expandedEndLine < documentLastLine && expandedEndLine + 1 < nextBlockingStartLine) {
@@ -313,6 +316,18 @@ function extendExpectedRangesAcrossBlankLines(document, expectedRanges) {
     }
 
     return [currentRange[0], expandedEndLine];
+    });
+}
+
+function getExpectedStepRanges(scenario) {
+  return [
+    ...(Array.isArray(scenario?.expectedBodyRanges?.firstLevel) ? scenario.expectedBodyRanges.firstLevel : []),
+    ...(Array.isArray(scenario?.expectedBodyRanges?.secondLevel) ? scenario.expectedBodyRanges.secondLevel : [])
+  ].sort((left, right) => {
+    if (left[0] !== right[0]) {
+      return left[0] - right[0];
+    }
+    return left[1] - right[1];
   });
 }
 
@@ -463,55 +478,42 @@ suite("Robot Companion documentation folding UI", function () {
         }
       });
 
-      test("foldDocumentationToFirstLevel keeps the expected first-level steps visible and hides their bodies", async () => {
+      test("foldDocumentationToSteps keeps the expected step markers visible and hides their bodies", async () => {
+        const expectedStepRanges = getExpectedStepRanges(scenario);
         await placeCursorAtDocumentEnd(editor);
-        await runFoldCommand("robotCompanion.foldDocumentationToFirstLevel");
+        await runFoldCommand("robotCompanion.foldDocumentationToSteps");
         await assertActiveProviderRanges(
           document,
-          scenario.expectedBodyRanges.firstLevel,
-          "first-level fold should expose only first-level body ranges through the provider"
+          expectedStepRanges,
+          "step fold should expose first-level and nested step body ranges through the provider"
         );
         await assertCursorJumpSequence(
           editor,
           scenario.firstLevelCursorJumps,
-          "first-level fold"
+          "step fold"
         );
       });
 
-      test("foldDocumentationToFirstLevel clears an existing owner fold before applying documentation folds", async () => {
+      test("foldDocumentationToSteps clears an existing owner fold before applying documentation folds", async () => {
+        const expectedStepRanges = getExpectedStepRanges(scenario);
         await createOwnerFold(editor, scenario.ownerLine);
         await placeCursorAtDocumentEnd(editor);
-        await runFoldCommand("robotCompanion.foldDocumentationToFirstLevel");
+        await runFoldCommand("robotCompanion.foldDocumentationToSteps");
         await assertActiveProviderRanges(
           document,
-          scenario.expectedBodyRanges.firstLevel,
-          "first-level fold after clearing owner fold should expose only first-level body ranges"
+          expectedStepRanges,
+          "step fold after clearing owner fold should expose first-level and nested step body ranges"
         );
         await waitForCursorDownResult(
           editor,
           scenario.ownerLine,
           scenario.ownerLine + 1,
-          "owner line should no longer stay collapsed after first-level folding"
+          "owner line should no longer stay collapsed after step folding"
         );
         await assertCursorJumpSequence(
           editor,
           scenario.firstLevelCursorJumps,
-          "first-level fold after clearing owner fold"
-        );
-      });
-
-      test("foldDocumentationToSecondLevel keeps only the expected nested steps collapsed", async () => {
-        await placeCursorAtDocumentEnd(editor);
-        await runFoldCommand("robotCompanion.foldDocumentationToSecondLevel");
-        await assertActiveProviderRanges(
-          document,
-          scenario.expectedBodyRanges.secondLevel,
-          "second-level fold should expose only second-level body ranges through the provider"
-        );
-        await assertCursorJumpSequence(
-          editor,
-          scenario.secondLevelCursorJumps,
-          "second-level fold"
+          "step fold after clearing owner fold"
         );
       });
 
@@ -567,22 +569,13 @@ suite("Robot Companion documentation folding UI", function () {
         }
 
         await placeCursorAtDocumentEnd(editor);
-        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToFirstLevel", document);
+        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToSteps", document);
         await assertActiveProviderRanges(
           document,
-          scenario.expectedBodyRanges.firstLevel,
-          "preview first-level fold should expose only first-level body ranges through the provider"
+          getExpectedStepRanges(scenario),
+          "preview step fold should expose first-level and nested step body ranges through the provider"
         );
-        await assertCursorJumpSequence(editor, scenario.firstLevelCursorJumps, "preview first-level fold");
-
-        await placeCursorAtDocumentEnd(editor);
-        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToSecondLevel", document);
-        await assertActiveProviderRanges(
-          document,
-          scenario.expectedBodyRanges.secondLevel,
-          "preview second-level fold should expose only second-level body ranges through the provider"
-        );
-        await assertCursorJumpSequence(editor, scenario.secondLevelCursorJumps, "preview second-level fold");
+        await assertCursorJumpSequence(editor, scenario.firstLevelCursorJumps, "preview step fold");
 
         await placeCursorAtDocumentEnd(editor);
         editor = await runPreviewFoldCommand("robotCompanion.unfoldDocumentation", document);
@@ -620,14 +613,9 @@ suite("Robot Companion documentation folding UI", function () {
               terminalExpectation: scenario.terminalHeadlineCursorExpectation
             },
             {
-              command: "robotCompanion.foldDocumentationToFirstLevel",
-              expectedRanges: scenario.expectedBodyRanges.firstLevel,
+              command: "robotCompanion.foldDocumentationToSteps",
+              expectedRanges: getExpectedStepRanges(scenario),
               jumps: scenario.firstLevelCursorJumps
-            },
-            {
-              command: "robotCompanion.foldDocumentationToSecondLevel",
-              expectedRanges: scenario.expectedBodyRanges.secondLevel,
-              jumps: scenario.secondLevelCursorJumps
             },
             {
               command: "robotCompanion.foldDocumentationToHeadlines",

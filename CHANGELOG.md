@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.66
+
+- Added hover support for Robot Framework 7 local `VAR` assignments such as `VAR    ${name}    value`.
+- Added support for typed variable names like `${name: date}` in local variable lookups, including typed `Set Variable` assignments.
+- Variable-value hovers and related value-source displays now show whether the resolved value came from `VAR` or `Set Variable`.
+
+## 0.4.65
+
+- Renamed the Documentation Preview fold action from `Level 3` back to `Headlines`.
+- Replaced separate `Level 4` and `Level 5` preview actions with one combined `Steps` action that folds both `#>` step markers and nested `#>>` markers together.
+- Updated the parser and real VS Code UI regression suites to validate the combined step-fold behavior and the current large adjustment fixture shape.
+
 ## 0.4.64
 
 - Fixed the remaining EOF headline folding edge case where the last documentation headline could reopen when its body reached the end of the testcase or keyword.

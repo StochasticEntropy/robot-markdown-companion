@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Robot Companion for Robot Framework: return/value/enum intelligence with synchronized documentation preview.",
-  "version": "0.4.64",
+  "version": "0.4.66",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -65,8 +65,7 @@
     "onCommand:robotCompanion.showOutput",
     "onCommand:robotCompanion.useAsDefaultFoldingProvider",
     "onCommand:robotCompanion.foldDocumentationToHeadlines",
-    "onCommand:robotCompanion.foldDocumentationToFirstLevel",
-    "onCommand:robotCompanion.foldDocumentationToSecondLevel",
+    "onCommand:robotCompanion.foldDocumentationToSteps",
     "onCommand:robotCompanion.unfoldDocumentation",
     "onView:robotCompanion.view",
     "onView:robotCompanion.returnView"
@@ -110,17 +109,12 @@
       },
       {
         "command": "robotCompanion.foldDocumentationToHeadlines",
-        "title": "Fold Documentation To Level 3",
+        "title": "Fold Documentation To Headlines",
         "category": "Robot Companion"
       },
       {
-        "command": "robotCompanion.foldDocumentationToFirstLevel",
-        "title": "Fold Documentation To Level 4",
-        "category": "Robot Companion"
-      },
-      {
-        "command": "robotCompanion.foldDocumentationToSecondLevel",
-        "title": "Fold Documentation To Level 5",
+        "command": "robotCompanion.foldDocumentationToSteps",
+        "title": "Fold Documentation To Steps",
         "category": "Robot Companion"
       },
       {

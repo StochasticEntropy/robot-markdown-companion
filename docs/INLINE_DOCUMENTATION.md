@@ -30,11 +30,10 @@ These lines are picked up by the Documentation Preview and rendered as Markdown 
   Creates a nested second-level documentation line.
   This is commonly used for follow-up bullets or arrow notes such as `#>> -> result`.
 
-Rendering can handle deeper indentation patterns, but the preview folding actions currently use these three exact buckets:
+Rendering can handle deeper indentation patterns, but the preview folding actions currently use these buckets:
 
-- `Level 3`: headline lines from `#> ## ...` and `#> ### ...`
-- `Level 4`: first-level lines from `#> ...` that are not headlines
-- `Level 5`: second-level lines from `#>> ...`
+- `Headlines`: headline lines from `#> ## ...` and `#> ### ...`
+- `Steps`: all step lines from `#> ...` that are not headlines, together with nested `#>> ...` lines
 
 ## How it groups content
 
