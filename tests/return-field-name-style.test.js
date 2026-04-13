@@ -62,7 +62,12 @@ function loadExtensionModule() {
           appendText() {}
         },
         Range: class {},
-        Position: class {},
+        Position: class {
+          constructor(line, character) {
+            this.line = line;
+            this.character = character;
+          }
+        },
         Hover: class {},
         FoldingRange: class {
           constructor(start, end, kind) {
@@ -75,7 +80,14 @@ function loadExtensionModule() {
         CodeLens: class {},
         TreeItem: class {},
         ThemeIcon: class {},
-        Selection: class {},
+        Selection: class {
+          constructor(start, end) {
+            this.start = start;
+            this.end = end;
+            this.anchor = start;
+            this.active = end;
+          }
+        },
         CompletionItemKind: {
           Field: 5,
           Variable: 6,
@@ -126,6 +138,7 @@ const workerTestApi = workerModule.__test__;
 
 function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
   const text = String(source || "").replace(/^\n/, "");
+  const lines = text.split(/\r?\n/);
   return {
     uri: {
       toString: () => `file://${filePath}`,
@@ -133,6 +146,10 @@ function createMockRobotDocument(source, filePath = "/tmp/mock.robot") {
       path: filePath
     },
     version: 1,
+    lineCount: lines.length,
+    lineAt: (line) => ({
+      text: lines[Math.max(0, Math.min(lines.length - 1, Number(line) || 0))] || ""
+    }),
     getText: () => text
   };
 }
@@ -1071,11 +1088,16 @@ Keyword TieredClassicDoc
 }
 
 function runDocumentationPreviewActionLinkTests() {
-  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml("file:///tmp/folding.robot");
-  assert.match(previewActions, /command:robotCompanion\.foldDocumentationToHeadlines/);
-  assert.match(previewActions, /command:robotCompanion\.foldDocumentationToFirstLevel/);
-  assert.match(previewActions, /command:robotCompanion\.foldDocumentationToSecondLevel/);
-  assert.match(previewActions, /command:robotCompanion\.unfoldDocumentation/);
+  const documentUri = "file:///tmp/folding.robot";
+  const encodedArgs = encodeURIComponent(JSON.stringify([documentUri]));
+  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri);
+  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToHeadlines\\?${encodedArgs}`));
+  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToFirstLevel\\?${encodedArgs}`));
+  assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSecondLevel\\?${encodedArgs}`));
+  assert.match(previewActions, />Level 3</);
+  assert.match(previewActions, />Level 4</);
+  assert.match(previewActions, />Level 5</);
+  assert.match(previewActions, new RegExp(`command:robotCompanion\\.unfoldDocumentation\\?${encodedArgs}`));
   assert.strictEqual(extensionTestApi.buildDocumentationPreviewActionsHtml(""), "");
 }
 

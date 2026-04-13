@@ -390,22 +390,6 @@ function setActiveDocumentationBodyFoldTier(documentUri, tier) {
   };
 }
 
-async function setFoldStateForSelectionLines(selectionLines, shouldFold) {
-  const lines = uniqueSortedNumbers(selectionLines);
-  if (lines.length === 0) {
-    return;
-  }
-
-  const orderedLines = shouldFold ? [...lines].sort((left, right) => right - left) : lines;
-  const command = shouldFold ? "editor.fold" : "editor.unfold";
-  for (const line of orderedLines) {
-    await vscode.commands.executeCommand(command, {
-      selectionLines: [line],
-      levels: 1
-    });
-  }
-}
-
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
@@ -416,58 +400,125 @@ async function setDocumentationBodyFoldTierState(documentUri, tier, foldingRange
   await delay(DOCUMENTATION_FOLDING_REFRESH_DELAY_MS);
 }
 
-async function setDocumentationBodyFoldState(parser, foldingRangeProvider, maxTier, shouldFold = true) {
-  const editor = vscode.window.activeTextEditor;
+async function setDocumentationBuiltInFoldLevelState(foldingRangeProvider, foldLevel, targetDocumentUri = "") {
+  const editor = await resolveRobotEditorForFolding(targetDocumentUri);
   if (!editor || !isRobotDocument(editor.document) || isRobotCompanionPausedForDebug()) {
     return;
   }
 
-  const parsed = parser.getParsed(editor.document);
-  const documentUri = editor.document.uri?.toString?.() || "";
-  const selectedTier = normalizeDocumentationBodyFoldTier(maxTier);
-  const bodyRangesByTier = new Map(
-    [
-      DOCUMENTATION_BODY_FOLD_TIER.HEADLINES,
-      DOCUMENTATION_BODY_FOLD_TIER.FIRST_LEVEL,
-      DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL
-    ].map((tier) => [tier, buildDocumentationBodyFoldingRanges(parsed.blocks, tier)])
-  );
-  const documentationRangeLines = uniqueSortedNumbers(
-    buildDocumentationFoldingRanges(parsed.blocks).map((range) => range.startLine)
-  );
-  if (documentationRangeLines.length > 0) {
-    await setDocumentationBodyFoldTierState("", null, foldingRangeProvider);
-    await setFoldStateForSelectionLines(documentationRangeLines, false);
-  }
-
-  for (const tier of [
-    DOCUMENTATION_BODY_FOLD_TIER.HEADLINES,
-    DOCUMENTATION_BODY_FOLD_TIER.FIRST_LEVEL,
-    DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL
-  ]) {
-    const tierLines = uniqueSortedNumbers((bodyRangesByTier.get(tier) || []).map((range) => range.startLine));
-    if (tierLines.length === 0) {
-      continue;
-    }
-    await setDocumentationBodyFoldTierState(documentUri, tier, foldingRangeProvider);
-    await setFoldStateForSelectionLines(tierLines, false);
-  }
-
-  if (!shouldFold) {
-    await setDocumentationBodyFoldTierState("", null, foldingRangeProvider);
-    return;
-  }
-
-  const selectedRanges = selectedTier === null ? [] : bodyRangesByTier.get(selectedTier) || [];
-  const selectedLines = uniqueSortedNumbers(selectedRanges.map((range) => range.startLine));
-  if (selectedLines.length === 0) {
-    await setDocumentationBodyFoldTierState("", null, foldingRangeProvider);
-    return;
-  }
-
-  await setDocumentationBodyFoldTierState(documentUri, selectedTier, foldingRangeProvider);
-  await setFoldStateForSelectionLines(selectedLines, true);
+  await focusTextEditor(editor);
+  await setDocumentationBodyFoldTierState("", null, foldingRangeProvider);
+  await resetEditorFoldingState(editor);
+  await vscode.commands.executeCommand(`editor.foldLevel${Math.max(1, Number(foldLevel) || 1)}`);
+  await delay(75);
 }
+
+async function unfoldDocumentationBuiltInState(foldingRangeProvider, targetDocumentUri = "") {
+  const editor = await resolveRobotEditorForFolding(targetDocumentUri);
+  if (!editor || !isRobotDocument(editor.document) || isRobotCompanionPausedForDebug()) {
+    return;
+  }
+
+  await focusTextEditor(editor);
+  await setDocumentationBodyFoldTierState("", null, foldingRangeProvider);
+  await resetEditorFoldingState(editor);
+}
+
+function normalizeCommandDocumentUri(documentUri) {
+  if (documentUri instanceof vscode.Uri) {
+    return documentUri.toString();
+  }
+  if (typeof documentUri === "string") {
+    return documentUri.trim();
+  }
+  if (documentUri && typeof documentUri.toString === "function") {
+    return String(documentUri.toString() || "").trim();
+  }
+  return "";
+}
+
+async function focusTextEditor(editor) {
+  if (!editor?.document) {
+    return editor;
+  }
+
+  try {
+    const focusedEditor = await vscode.window.showTextDocument(editor.document, {
+      viewColumn: editor.viewColumn,
+      preserveFocus: false,
+      preview: false
+    });
+    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+    await delay(75);
+    return focusedEditor;
+  } catch {
+    return editor;
+  }
+}
+
+async function resetEditorFoldingState(editor) {
+  if (!editor?.document) {
+    return;
+  }
+
+  try {
+    await vscode.commands.executeCommand("editor.removeManualFoldingRanges");
+  } catch {
+    // Older VS Code versions may not expose manual folding range commands.
+  }
+
+  await vscode.commands.executeCommand("editor.unfoldAll");
+  await delay(50);
+}
+
+async function resolveRobotEditorForFolding(targetDocumentUri = "") {
+  const normalizedTargetDocumentUri = normalizeCommandDocumentUri(targetDocumentUri);
+
+  if (normalizedTargetDocumentUri) {
+    const visibleEditor = vscode.window.visibleTextEditors.find(
+      (candidate) =>
+        candidate?.document &&
+        isRobotDocument(candidate.document) &&
+        candidate.document.uri.toString() === normalizedTargetDocumentUri
+    );
+    if (visibleEditor) {
+      return visibleEditor;
+    }
+
+    let targetDocument = vscode.workspace.textDocuments.find(
+      (candidate) => candidate.uri.toString() === normalizedTargetDocumentUri
+    );
+    if (!targetDocument) {
+      try {
+        targetDocument = await vscode.workspace.openTextDocument(vscode.Uri.parse(normalizedTargetDocumentUri));
+      } catch {
+        return undefined;
+      }
+    }
+
+    if (!isRobotDocument(targetDocument)) {
+      return undefined;
+    }
+
+    try {
+      return await vscode.window.showTextDocument(targetDocument, {
+        preview: false,
+        preserveFocus: false
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (vscode.window.activeTextEditor?.document && isRobotDocument(vscode.window.activeTextEditor.document)) {
+    return vscode.window.activeTextEditor;
+  }
+
+  return vscode.window.visibleTextEditors.find(
+    (candidate) => candidate?.document && isRobotDocument(candidate.document)
+  );
+}
+
 
 function shouldTraceReturnResolution(rootTypeNames, simpleAccess, technicalStructureLines) {
   const normalizedTypeNames = uniqueStrings(
@@ -682,59 +733,39 @@ function activate(context) {
         );
       }
     }),
-    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_HEADLINES, async () => {
+    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_HEADLINES, async (documentUri) => {
       try {
-        await setDocumentationBodyFoldState(
-          parser,
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.HEADLINES,
-          true
-        );
+        await setDocumentationBuiltInFoldLevelState(foldingRangeProvider, 3, documentUri);
       } catch (error) {
-        logRobotCompanionError("Failed to fold documentation to headlines", error);
+        logRobotCompanionError("Failed to fold documentation to level 3", error);
         await vscode.window.showErrorMessage(
-          "Robot Companion could not fold documentation to headlines. See the Robot Companion output for details."
+          "Robot Companion could not fold documentation to level 3. See the Robot Companion output for details."
         );
       }
     }),
-    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL, async () => {
+    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL, async (documentUri) => {
       try {
-        await setDocumentationBodyFoldState(
-          parser,
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.FIRST_LEVEL,
-          true
-        );
+        await setDocumentationBuiltInFoldLevelState(foldingRangeProvider, 4, documentUri);
       } catch (error) {
-        logRobotCompanionError("Failed to fold documentation to the first level", error);
+        logRobotCompanionError("Failed to fold documentation to level 4", error);
         await vscode.window.showErrorMessage(
-          "Robot Companion could not fold documentation to the first level. See the Robot Companion output for details."
+          "Robot Companion could not fold documentation to level 4. See the Robot Companion output for details."
         );
       }
     }),
-    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL, async () => {
+    vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL, async (documentUri) => {
       try {
-        await setDocumentationBodyFoldState(
-          parser,
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL,
-          true
-        );
+        await setDocumentationBuiltInFoldLevelState(foldingRangeProvider, 5, documentUri);
       } catch (error) {
-        logRobotCompanionError("Failed to fold documentation to the second level", error);
+        logRobotCompanionError("Failed to fold documentation to level 5", error);
         await vscode.window.showErrorMessage(
-          "Robot Companion could not fold documentation to the second level. See the Robot Companion output for details."
+          "Robot Companion could not fold documentation to level 5. See the Robot Companion output for details."
         );
       }
     }),
-    vscode.commands.registerCommand(CMD_UNFOLD_DOCUMENTATION, async () => {
+    vscode.commands.registerCommand(CMD_UNFOLD_DOCUMENTATION, async (documentUri) => {
       try {
-        await setDocumentationBodyFoldState(
-          parser,
-          foldingRangeProvider,
-          DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL,
-          false
-        );
+        await unfoldDocumentationBuiltInState(foldingRangeProvider, documentUri);
       } catch (error) {
         logRobotCompanionError("Failed to unfold documentation", error);
         await vscode.window.showErrorMessage(
@@ -743,10 +774,10 @@ function activate(context) {
       }
     }),
     vscode.commands.registerCommand(CMD_FOLD_DOCUMENTATION_OVERVIEW, async () =>
-      setDocumentationBodyFoldState(parser, foldingRangeProvider, DOCUMENTATION_BODY_FOLD_TIER.HEADLINES, true)
+      setDocumentationBuiltInFoldLevelState(foldingRangeProvider, 3)
     ),
     vscode.commands.registerCommand(CMD_UNFOLD_DOCUMENTATION_OVERVIEW, async () =>
-      setDocumentationBodyFoldState(parser, foldingRangeProvider, DOCUMENTATION_BODY_FOLD_TIER.SECOND_LEVEL, false)
+      unfoldDocumentationBuiltInState(foldingRangeProvider)
     ),
     vscode.commands.registerCommand(CMD_INVALIDATE_CACHES, async () => {
       parser.clearAll();
@@ -3892,17 +3923,18 @@ function buildDocumentationPreviewActionsHtml(documentUri) {
     return "";
   }
 
-  const foldDocumentationHeadlinesCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_HEADLINES}`;
-  const foldDocumentationFirstLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL}`;
-  const foldDocumentationSecondLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL}`;
-  const unfoldDocumentationCommand = `command:${CMD_UNFOLD_DOCUMENTATION}`;
+  const commandArgs = encodeURIComponent(JSON.stringify([String(documentUri)]));
+  const foldDocumentationHeadlinesCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_HEADLINES}?${commandArgs}`;
+  const foldDocumentationFirstLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_FIRST_LEVEL}?${commandArgs}`;
+  const foldDocumentationSecondLevelCommand = `command:${CMD_FOLD_DOCUMENTATION_TO_SECOND_LEVEL}?${commandArgs}`;
+  const unfoldDocumentationCommand = `command:${CMD_UNFOLD_DOCUMENTATION}?${commandArgs}`;
   return `<div class=\"preview-actions\">
           <span class=\"preview-actions-label\">Fold To:</span>
-          <a href=\"${foldDocumentationHeadlinesCommand}\">Headlines (##/###)</a>
+          <a href=\"${foldDocumentationHeadlinesCommand}\">Level 3</a>
           <span class=\"preview-actions-separator\">|</span>
-          <a href=\"${foldDocumentationFirstLevelCommand}\">First Level (#&gt;)</a>
+          <a href=\"${foldDocumentationFirstLevelCommand}\">Level 4</a>
           <span class=\"preview-actions-separator\">|</span>
-          <a href=\"${foldDocumentationSecondLevelCommand}\">Second Level (#&gt;&gt;)</a>
+          <a href=\"${foldDocumentationSecondLevelCommand}\">Level 5</a>
           <span class=\"preview-actions-separator\">|</span>
           <a href=\"${unfoldDocumentationCommand}\">Unfold</a>
         </div>`;

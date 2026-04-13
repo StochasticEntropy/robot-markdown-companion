@@ -7,30 +7,74 @@ const FIXTURE_SCENARIOS = [
   {
     fixtureName: "folding-regression.robot",
     label: "testcase owner",
+    ownerLine: 1,
     headlineRanges: [
       { start: 3, end: 9 },
       { start: 10, end: 13 }
     ],
+    headlineMarkerLine: 2,
+    headlineNextVisibleLine: 9,
     firstLevelRanges: [
       { start: 4, end: 7 },
       { start: 8, end: 9 },
       { start: 11, end: 13 }
     ],
-    secondLevelRanges: [{ start: 6, end: 7 }]
+    firstLevelMarkerLine: 3,
+    firstLevelNextVisibleLine: 7,
+    secondLevelRanges: [{ start: 6, end: 7 }],
+    secondLevelMarkerLine: 5,
+    secondLevelNextVisibleLine: 7
   },
   {
     fixtureName: "folding-regression-keywords.robot",
     label: "keyword owner",
+    ownerLine: 1,
     headlineRanges: [
       { start: 3, end: 9 },
       { start: 10, end: 13 }
     ],
+    headlineMarkerLine: 2,
+    headlineNextVisibleLine: 9,
     firstLevelRanges: [
       { start: 4, end: 7 },
       { start: 8, end: 9 },
       { start: 11, end: 13 }
     ],
-    secondLevelRanges: [{ start: 6, end: 7 }]
+    firstLevelMarkerLine: 3,
+    firstLevelNextVisibleLine: 7,
+    secondLevelRanges: [{ start: 6, end: 7 }],
+    secondLevelMarkerLine: 5,
+    secondLevelNextVisibleLine: 7
+  },
+  {
+    fixtureName: "LeistungEinweisungTRB.robot",
+    label: "large testcase owner",
+    ownerLine: 10,
+    headlineRanges: [
+      { start: 28, end: 29 },
+      { start: 30, end: 41 },
+      { start: 42, end: 74 },
+      { start: 75, end: 160 }
+    ],
+    headlineMarkerLine: 27,
+    headlineNextVisibleLine: 29,
+    firstLevelRanges: [
+      { start: 31, end: 33 },
+      { start: 34, end: 40 },
+      { start: 43, end: 57 },
+      { start: 59, end: 73 },
+      { start: 80, end: 97 },
+      { start: 98, end: 138 },
+      { start: 139, end: 160 }
+    ],
+    firstLevelMarkerLine: 30,
+    firstLevelNextVisibleLine: 33,
+    secondLevelRanges: [
+      { start: 85, end: 96 },
+      { start: 140, end: 159 }
+    ],
+    secondLevelMarkerLine: 84,
+    secondLevelNextVisibleLine: 96
   }
 ];
 
@@ -86,6 +130,12 @@ async function waitForFoldingRanges(document, expectedRanges, label) {
 }
 
 async function setCursor(editor, line, character = 0) {
+  await vscode.window.showTextDocument(editor.document, {
+    preview: false,
+    preserveFocus: false,
+    viewColumn: editor.viewColumn
+  });
+  await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
   const position = new vscode.Position(line, character);
   const selection = new vscode.Selection(position, position);
   editor.selection = selection;
@@ -94,11 +144,52 @@ async function setCursor(editor, line, character = 0) {
 }
 
 async function waitForCursorDownResult(editor, startLine, expectedLine, label) {
-  await waitFor(async () => {
-    await setCursor(editor, startLine);
-    await vscode.commands.executeCommand("cursorDown");
-    return editor.selection.active.line === expectedLine;
-  }, label);
+  let lastActualLine = -1;
+  try {
+    await waitFor(async () => {
+      await setCursor(editor, startLine);
+      await vscode.commands.executeCommand("cursorDown");
+      lastActualLine = editor.selection.active.line;
+      return lastActualLine === expectedLine;
+    }, label);
+  } catch (error) {
+    throw new Error(`${error.message} Expected line ${expectedLine}, last actual ${lastActualLine}.`);
+  }
+}
+
+async function runFoldCommand(command) {
+  await vscode.commands.executeCommand("workbench.action.focusSideBar");
+  await sleep(100);
+  await vscode.commands.executeCommand(command);
+}
+
+async function openNonRobotEditor() {
+  const extension = vscode.extensions.getExtension(EXTENSION_ID);
+  assert(extension, `Expected extension ${EXTENSION_ID} to be available in the test host.`);
+  const packageDocument = await vscode.workspace.openTextDocument(path.join(extension.extensionPath, "package.json"));
+  await vscode.window.showTextDocument(packageDocument, {
+    preview: false,
+    preserveFocus: false
+  });
+  await sleep(75);
+}
+
+async function runPreviewFoldCommand(command, document) {
+  await openNonRobotEditor();
+  await vscode.commands.executeCommand("workbench.action.focusSideBar");
+  await sleep(100);
+  await vscode.commands.executeCommand(command, document.uri.toString());
+  await sleep(150);
+  return vscode.window.showTextDocument(document, {
+    preview: false,
+    preserveFocus: false
+  });
+}
+
+async function createOwnerFold(editor, ownerLine) {
+  await setCursor(editor, ownerLine);
+  await vscode.commands.executeCommand("editor.fold");
+  await sleep(200);
 }
 
 suite("Robot Companion documentation folding UI", function () {
@@ -160,48 +251,128 @@ suite("Robot Companion documentation folding UI", function () {
       });
 
       test("foldDocumentationToHeadlines exposes only headline ranges and skips nested bodies in the editor", async () => {
-        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
-        await waitForFoldingRanges(document, scenario.headlineRanges, "headline folding ranges");
+        await runFoldCommand("robotCompanion.foldDocumentationToHeadlines");
         await waitForCursorDownResult(
           editor,
-          2,
-          9,
+          scenario.headlineMarkerLine,
+          scenario.headlineNextVisibleLine,
           "headline fold should jump from the first headline to the next headline"
         );
       });
 
-      test("foldDocumentationToFirstLevel exposes only first-level ranges and keeps the owner visible", async () => {
-        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToFirstLevel");
-        await waitForFoldingRanges(document, scenario.firstLevelRanges, "first-level folding ranges");
+      test("foldDocumentationToHeadlines clears an existing owner fold before applying documentation folds", async () => {
+        await createOwnerFold(editor, scenario.ownerLine);
+        await runFoldCommand("robotCompanion.foldDocumentationToHeadlines");
         await waitForCursorDownResult(
           editor,
-          3,
-          7,
+          scenario.ownerLine,
+          scenario.ownerLine + 1,
+          "owner line should no longer stay collapsed after headline folding"
+        );
+        await waitForCursorDownResult(
+          editor,
+          scenario.headlineMarkerLine,
+          scenario.headlineNextVisibleLine,
+          "headline fold should still land on the next headline after clearing an owner fold"
+        );
+      });
+
+      test("foldDocumentationToFirstLevel exposes only first-level ranges and keeps the owner visible", async () => {
+        await runFoldCommand("robotCompanion.foldDocumentationToFirstLevel");
+        await waitForCursorDownResult(
+          editor,
+          scenario.firstLevelMarkerLine,
+          scenario.firstLevelNextVisibleLine,
           "first-level fold should jump from the first top-level marker to the next top-level peer"
         );
       });
 
-      test("foldDocumentationToSecondLevel exposes only nested ranges and skips only the nested body", async () => {
-        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToSecondLevel");
-        await waitForFoldingRanges(document, scenario.secondLevelRanges, "second-level folding ranges");
+      test("foldDocumentationToFirstLevel clears an existing owner fold before applying documentation folds", async () => {
+        await createOwnerFold(editor, scenario.ownerLine);
+        await runFoldCommand("robotCompanion.foldDocumentationToFirstLevel");
         await waitForCursorDownResult(
           editor,
-          5,
-          7,
+          scenario.ownerLine,
+          scenario.ownerLine + 1,
+          "owner line should no longer stay collapsed after first-level folding"
+        );
+        await waitForCursorDownResult(
+          editor,
+          scenario.firstLevelMarkerLine,
+          scenario.firstLevelNextVisibleLine,
+          "first-level fold should still land on the next top-level peer after clearing an owner fold"
+        );
+      });
+
+      test("foldDocumentationToSecondLevel exposes only nested ranges and skips only the nested body", async () => {
+        await runFoldCommand("robotCompanion.foldDocumentationToSecondLevel");
+        await waitForCursorDownResult(
+          editor,
+          scenario.secondLevelMarkerLine,
+          scenario.secondLevelNextVisibleLine,
           "second-level fold should jump from the nested marker to the next visible top-level marker"
         );
       });
 
       test("unfoldDocumentation restores line-by-line cursor movement", async () => {
-        await vscode.commands.executeCommand("robotCompanion.foldDocumentationToHeadlines");
-        await waitForFoldingRanges(document, scenario.headlineRanges, "headline folding ranges before unfolding");
+        await runFoldCommand("robotCompanion.foldDocumentationToHeadlines");
 
-        await vscode.commands.executeCommand("robotCompanion.unfoldDocumentation");
+        await runFoldCommand("robotCompanion.unfoldDocumentation");
         await sleep(250);
 
-        await waitForCursorDownResult(editor, 2, 3, "headline marker should move to the next line after unfold");
-        await waitForCursorDownResult(editor, 3, 4, "first-level marker should move to the next line after unfold");
-        await waitForCursorDownResult(editor, 5, 6, "second-level marker should move to the next line after unfold");
+        await waitForCursorDownResult(
+          editor,
+          scenario.headlineMarkerLine,
+          scenario.headlineMarkerLine + 1,
+          "headline marker should move to the next line after unfold"
+        );
+        await waitForCursorDownResult(
+          editor,
+          scenario.firstLevelMarkerLine,
+          scenario.firstLevelMarkerLine + 1,
+          "first-level marker should move to the next line after unfold"
+        );
+        await waitForCursorDownResult(
+          editor,
+          scenario.secondLevelMarkerLine,
+          scenario.secondLevelMarkerLine + 1,
+          "second-level marker should move to the next line after unfold"
+        );
+      });
+
+      test("preview-targeted folding commands work even when a non-robot editor is active", async () => {
+        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToHeadlines", document);
+        await waitForCursorDownResult(
+          editor,
+          scenario.headlineMarkerLine,
+          scenario.headlineNextVisibleLine,
+          "preview headline fold should jump to the next headline"
+        );
+
+        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToFirstLevel", document);
+        await waitForCursorDownResult(
+          editor,
+          scenario.firstLevelMarkerLine,
+          scenario.firstLevelNextVisibleLine,
+          "preview first-level fold should jump to the next top-level marker"
+        );
+
+        editor = await runPreviewFoldCommand("robotCompanion.foldDocumentationToSecondLevel", document);
+        await waitForCursorDownResult(
+          editor,
+          scenario.secondLevelMarkerLine,
+          scenario.secondLevelNextVisibleLine,
+          "preview second-level fold should jump over only the nested body"
+        );
+
+        editor = await runPreviewFoldCommand("robotCompanion.unfoldDocumentation", document);
+        await sleep(250);
+        await waitForCursorDownResult(
+          editor,
+          scenario.headlineMarkerLine,
+          scenario.headlineMarkerLine + 1,
+          "preview unfold should restore line-by-line movement"
+        );
       });
     });
   }

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.53
+
+- Restored the underlying documentation folding behavior from `0.4.51`.
+- Kept the Documentation Preview fold actions on VS Code's native folding commands:
+  - `Level 3` for headlines
+  - `Level 4` for first-level markers
+  - `Level 5` for second-level markers
+- Preview fold actions still run `Unfold All` before applying the requested native fold level.
+
+## 0.4.52
+
+- Switched Documentation Preview `Fold To` actions to VS Code's native folding levels:
+  - `Level 3` for headlines
+  - `Level 4` for first-level documentation markers
+  - `Level 5` for second-level documentation markers
+- Preview fold actions now reset the editor with `Unfold All` before applying the requested fold level.
+
 ## 0.4.51
 
 - Switched the Documentation Preview fold links from cumulative tiers to exact marker classes, so `Headlines` targets heading docs, `First Level` targets top-level `#>` lines, and `Second Level` targets nested `#>>` lines instead of overlapping one another.
