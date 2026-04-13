@@ -359,6 +359,138 @@ function buildDocumentationOverviewRanges(blocks) {
   return buildAllDocumentationBodyFoldingRanges(blocks);
 }
 
+function buildDocumentationWrapperFoldingRanges(blocks) {
+  const ranges = [];
+  const seenKeys = new Set();
+  const sortedBlocks = (Array.isArray(blocks) ? blocks : [])
+    .map((block) => ({
+      ...block,
+      ownerStartLine: Math.max(0, Number(block?.ownerStartLine) || 0),
+      ownerEndLine: Math.max(0, Number(block?.ownerEndLine) || 0),
+      section: String(block?.section || "").trim().toLowerCase()
+    }))
+    .sort((left, right) => left.ownerStartLine - right.ownerStartLine);
+
+  let currentSectionRange = null;
+
+  const flushCurrentSectionRange = () => {
+    if (!currentSectionRange) {
+      return;
+    }
+    pushDocumentationFoldingRange(
+      ranges,
+      seenKeys,
+      currentSectionRange.startLine,
+      currentSectionRange.endLine
+    );
+    currentSectionRange = null;
+  };
+
+  for (const block of sortedBlocks) {
+    pushDocumentationFoldingRange(ranges, seenKeys, block.ownerStartLine, block.ownerEndLine);
+
+    const sectionStartLine = Math.max(0, block.ownerStartLine - 1);
+    if (!currentSectionRange) {
+      currentSectionRange = {
+        section: block.section,
+        startLine: sectionStartLine,
+        endLine: block.ownerEndLine
+      };
+      continue;
+    }
+
+    const sameSection = currentSectionRange.section === block.section;
+    const stillContiguous = sectionStartLine <= currentSectionRange.endLine + 2;
+    if (sameSection && stillContiguous) {
+      currentSectionRange.endLine = Math.max(currentSectionRange.endLine, block.ownerEndLine);
+      continue;
+    }
+
+    flushCurrentSectionRange();
+    currentSectionRange = {
+      section: block.section,
+      startLine: sectionStartLine,
+      endLine: block.ownerEndLine
+    };
+  }
+
+  flushCurrentSectionRange();
+
+  return ranges.sort((left, right) => {
+    if (left.startLine !== right.startLine) {
+      return left.startLine - right.startLine;
+    }
+    return left.endLine - right.endLine;
+  });
+}
+
+function extendDocumentationProviderRangesAcrossBlankLines(ranges, document) {
+  if (!document || typeof document.lineAt !== "function") {
+    return Array.isArray(ranges) ? ranges : [];
+  }
+
+  const sortedRanges = (Array.isArray(ranges) ? ranges : [])
+    .map((range) => ({
+      startLine: Math.max(0, Number(range?.startLine) || 0),
+      endLine: Math.max(0, Number(range?.endLine) || 0)
+    }))
+    .sort((left, right) => {
+      if (left.startLine !== right.startLine) {
+        return left.startLine - right.startLine;
+      }
+      return left.endLine - right.endLine;
+    });
+  const documentLastLine = Math.max(0, Number(document.lineCount) - 1);
+  const expandedRanges = [];
+  const seenKeys = new Set();
+
+  for (const currentRange of sortedRanges) {
+    let nextBlockingStartLine = documentLastLine + 1;
+    for (const candidateRange of sortedRanges) {
+      if (candidateRange.startLine > currentRange.endLine) {
+        nextBlockingStartLine = candidateRange.startLine;
+        break;
+      }
+    }
+
+    let expandedEndLine = currentRange.endLine;
+    while (expandedEndLine < documentLastLine && expandedEndLine + 1 < nextBlockingStartLine) {
+      const nextLineText = String(document.lineAt(expandedEndLine + 1)?.text || "");
+      if (nextLineText.trim().length > 0) {
+        break;
+      }
+      expandedEndLine += 1;
+    }
+
+    pushDocumentationFoldingRange(expandedRanges, seenKeys, currentRange.startLine, expandedEndLine);
+  }
+
+  return expandedRanges;
+}
+
+function buildDocumentationProviderRanges(blocks, document = undefined) {
+  const ranges = [];
+  const seenKeys = new Set();
+
+  for (const range of buildDocumentationWrapperFoldingRanges(blocks)) {
+    pushDocumentationFoldingRange(ranges, seenKeys, range.startLine, range.endLine);
+  }
+
+  for (const range of buildDocumentationFoldingRanges(blocks)) {
+    pushDocumentationFoldingRange(ranges, seenKeys, range.startLine, range.endLine);
+  }
+
+  return extendDocumentationProviderRangesAcrossBlankLines(
+    ranges.sort((left, right) => {
+      if (left.startLine !== right.startLine) {
+        return left.startLine - right.startLine;
+      }
+      return left.endLine - right.endLine;
+    }),
+    document
+  );
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
@@ -366,6 +498,34 @@ function delay(ms) {
 async function refreshDocumentationFoldingProvider(foldingRangeProvider) {
   foldingRangeProvider?.refresh?.();
   await delay(DOCUMENTATION_FOLDING_REFRESH_DELAY_MS);
+}
+
+async function withNormalizedFoldCursor(editor, callback) {
+  if (!editor?.document || typeof callback !== "function") {
+    return callback?.();
+  }
+
+  const originalSelections =
+    Array.isArray(editor.selections) && editor.selections.length > 0
+      ? editor.selections.slice()
+      : editor.selection
+        ? [editor.selection]
+        : [];
+  const anchorPosition = new vscode.Position(0, 0);
+  const anchorSelection = new vscode.Selection(anchorPosition, anchorPosition);
+
+  try {
+    editor.selections = [anchorSelection];
+    editor.selection = anchorSelection;
+    await delay(20);
+    return await callback();
+  } finally {
+    if (originalSelections.length > 0) {
+      editor.selections = originalSelections;
+      editor.selection = originalSelections[0];
+      await delay(20);
+    }
+  }
 }
 
 async function setDocumentationBuiltInFoldLevelState(foldingRangeProvider, foldLevel, targetDocumentUri = "") {
@@ -377,7 +537,9 @@ async function setDocumentationBuiltInFoldLevelState(foldingRangeProvider, foldL
   await focusTextEditor(editor);
   await refreshDocumentationFoldingProvider(foldingRangeProvider);
   await resetEditorFoldingState(editor);
-  await vscode.commands.executeCommand(`editor.foldLevel${Math.max(1, Number(foldLevel) || 1)}`);
+  await withNormalizedFoldCursor(editor, async () => {
+    await vscode.commands.executeCommand(`editor.foldLevel${Math.max(1, Number(foldLevel) || 1)}`);
+  });
   await delay(75);
 }
 
@@ -2700,6 +2862,7 @@ class RobotDocFoldingRangeProvider {
 
     const parsed = this._parser.getParsed(document);
     const foldingTrace = buildDocumentationFoldingTrace(parsed.blocks);
+    const providerRanges = buildDocumentationProviderRanges(parsed.blocks, document);
     const documentUri = document.uri?.toString?.() || "";
     if (getRobotCompanionLogLevel() === "trace") {
       logRobotCompanionTrace("Documentation folding trace", {
@@ -2707,10 +2870,11 @@ class RobotDocFoldingRangeProvider {
         lineCount: Number(document.lineCount) || 0,
         blockCount: Array.isArray(parsed.blocks) ? parsed.blocks.length : 0,
         blocks: foldingTrace.blocks,
-        ranges: foldingTrace.ranges
+        wrapperRanges: buildDocumentationWrapperFoldingRanges(parsed.blocks),
+        ranges: providerRanges
       });
     }
-    return foldingTrace.ranges.map(
+    return providerRanges.map(
       (range) => new vscode.FoldingRange(range.startLine, range.endLine, vscode.FoldingRangeKind.Region)
     );
   }

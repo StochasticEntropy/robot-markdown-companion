@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.55
+
+- Added stronger checked-in VS Code folding regressions for the anonymized large Robot fixtures, including the new adjustment scenario.
+- Verified direct-editor and preview-triggered folding jumps in a real Extension Development Host instead of relying only on parser-level range tests.
+- Made preview/native fold commands cursor-independent so folding no longer changes behavior based on the current caret position.
+
 ## 0.4.54
 
 - Cleaned up folding regression scaffolding after the preview-folding iteration.

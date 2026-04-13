@@ -1,4 +1,5 @@
 const assert = require("assert");
+const fs = require("fs");
 const Module = require("module");
 const path = require("path");
 
@@ -787,6 +788,70 @@ Case Nested
   assert(listTargets.some((target) => String(target.label).includes("line 5")));
 }
 
+function decodeDocumentationRenderTargets(renderedHtml) {
+  const targetMatch = String(renderedHtml || "").match(/data-doc-render-targets="([^"]+)"/);
+  assert(targetMatch, "expected rendered documentation HTML to include encoded source targets");
+  return JSON.parse(decodeURIComponent(targetMatch[1]));
+}
+
+async function runLargeFixtureRenderTargetTests() {
+  const fixtureExpectations = [
+    {
+      fixtureName: "folding-regression-large.robot",
+      expectedTargets: [
+        { line: 27, kind: "heading", labelFragment: "line 28" },
+        { line: 29, kind: "heading", labelFragment: "line 30" },
+        { line: 30, kind: "list-item", labelFragment: "line 31" },
+        { line: 33, kind: "list-item", labelFragment: "line 34" },
+        { line: 84, kind: "list-item", labelFragment: "line 85" },
+        { line: 139, kind: "chunk", labelFragment: "line 140" }
+      ]
+    },
+    {
+      fixtureName: "folding-regression-adjustment.robot",
+      expectedTargets: [
+        { line: 73, kind: "heading", labelFragment: "line 74" },
+        { line: 74, kind: "heading", labelFragment: "line 75" },
+        { line: 75, kind: "list-item", labelFragment: "line 76" },
+        { line: 162, kind: "chunk", labelFragment: "line 163" },
+        { line: 186, kind: "chunk", labelFragment: "line 187" },
+        { line: 205, kind: "heading", labelFragment: "line 206" },
+        { line: 311, kind: "heading", labelFragment: "line 312" },
+        { line: 333, kind: "chunk", labelFragment: "line 334" }
+      ]
+    }
+  ];
+
+  for (const fixture of fixtureExpectations) {
+    const fixturePath = path.resolve(__dirname, "fixtures", fixture.fixtureName);
+    const parser = new extensionTestApi.RobotDocumentationService();
+    const source = fs.readFileSync(fixturePath, "utf8");
+    const document = createMockRobotDocument(source, fixturePath);
+    const parsed = parser.parse(document);
+
+    assert.strictEqual(parsed.blocks.length, 1, `${fixture.fixtureName} should parse as a single target block`);
+
+    const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), parsed.blocks[0]);
+    const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
+
+    for (const expectedTarget of fixture.expectedTargets) {
+      const expectedCommandUri = extensionTestApi.buildOpenLocationCommandUri(
+        document.uri.toString(),
+        expectedTarget.line
+      );
+      assert(
+        decodedTargets.some(
+          (target) =>
+            target.kind === expectedTarget.kind &&
+            target.commandUri === expectedCommandUri &&
+            String(target.label || "").includes(expectedTarget.labelFragment)
+        ),
+        `${fixture.fixtureName} should expose a ${expectedTarget.kind} target for ${expectedTarget.labelFragment}`
+      );
+    }
+  }
+}
+
 function runDocumentationFoldingTests() {
   const document = createMockRobotDocument(`
 *** Test Cases ***
@@ -1092,6 +1157,7 @@ async function main() {
   runSecondLevelPreviewRenderingTests();
   await runInlineDocumentationTests();
   await runIndentedInlineDocumentationTests();
+  await runLargeFixtureRenderTargetTests();
   runDocumentationFoldingTests();
   runDocumentationBodyFoldingTests();
   runKeywordDocumentationBodyFoldingTests();
