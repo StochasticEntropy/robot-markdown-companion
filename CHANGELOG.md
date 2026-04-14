@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.79
+
+- Made ambiguous values in the documentation preview Variables section individually clickable so each possible value can jump to its own assignment line.
+- This now works for branch ambiguity, mixed keyword-return plus local assignment ambiguity, and repeated sequential reassignments.
+
 ## 0.4.78
 
 - Updated the documentation preview Variables section to mark a variable as ambiguous whenever the testcase contains multiple distinct assignments for it, not just conditional branch conflicts.

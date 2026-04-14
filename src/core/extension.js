@@ -4083,6 +4083,17 @@ class RobotDocPreviewViewProvider {
     .preview .doc-variable-value {
       overflow-wrap: anywhere;
     }
+    .preview .doc-variable-value-link {
+      color: inherit;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .preview .doc-variable-value-link:hover {
+      color: var(--vscode-textLink-foreground);
+    }
+    .preview .doc-variable-value-separator {
+      color: var(--vscode-descriptionForeground);
+    }
     .preview .doc-variable-hint {
       display: inline-block;
       margin-right: 8px;
@@ -14029,6 +14040,29 @@ function summarizeDocumentationConditionalCandidates(selection) {
   return candidates;
 }
 
+function buildDocumentationValueLinkEntries(documentUri, candidates) {
+  const valueLinks = [];
+  const seenValues = new Set();
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const displayValue = formatDocumentationVariableValuePreview(candidate?.value || "");
+    const key = normalizeComparableToken(displayValue);
+    if (!key || seenValues.has(key)) {
+      continue;
+    }
+    seenValues.add(key);
+    const sourceLine = Math.max(0, Number(candidate?.sourceLine) || 0);
+    valueLinks.push({
+      value: displayValue,
+      sourceLine,
+      commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+      label: `Open value source line ${sourceLine + 1}`
+    });
+  }
+
+  return valueLinks;
+}
+
 function buildVariableDefinitionEntriesFromSources(variableAssignments, keywordReturnAssignments, normalizedVariable) {
   const safeNormalizedVariable = String(normalizedVariable || "").trim();
   if (!safeNormalizedVariable) {
@@ -14122,9 +14156,22 @@ function buildDocumentationLocalVariableSummaryEntries(documentUri, block) {
     const commandUri = buildOpenLocationCommandUri(documentUri, sourceLine);
 
     if (hasMultipleValueVariants || summarySelection?.kind === "conditional") {
-      const candidateValues =
+      const valueLinks =
         hasMultipleValueVariants && valueVariants.length > 0
-          ? valueVariants.map((candidate) => candidate.value)
+          ? buildDocumentationValueLinkEntries(
+              documentUri,
+              valueVariants.map((candidate) => ({
+                value: candidate.value,
+                sourceLine: candidate.assignment?.startLine
+              }))
+            )
+          : buildDocumentationValueLinkEntries(
+              documentUri,
+              buildLocalVariableConditionalCandidates(summarySelection)
+            );
+      const candidateValues =
+        valueLinks.length > 0
+          ? valueLinks.map((candidate) => candidate.value)
           : summarizeDocumentationConditionalCandidates(summarySelection);
       summaryEntries.push({
         normalizedVariable,
@@ -14134,6 +14181,7 @@ function buildDocumentationLocalVariableSummaryEntries(documentUri, block) {
         commandUri,
         label: `Open variable definitions for ${displayToken} starting at line ${sourceLine + 1}`,
         valuePreview: candidateValues.join(" | ") || "(empty)",
+        valueLinks,
         hintText: "Ambiguous",
         isConditional: true
       });
@@ -14148,6 +14196,7 @@ function buildDocumentationLocalVariableSummaryEntries(documentUri, block) {
       commandUri,
       label: `Open ${getLocalVariableAssignmentSourceLabel(primaryAssignment)} line ${sourceLine + 1}`,
       valuePreview: buildDocumentationVariableCurrentValuePreview(primaryAssignment),
+      valueLinks: [],
       hintText: "",
       isConditional: false
     });
@@ -14258,9 +14307,26 @@ function renderDocumentationVariableSectionHtml(title, entries, options = {}) {
       const hintHtml = String(entry?.hintText || "").trim()
         ? `<span class="doc-variable-hint">${escapeHtml(String(entry.hintText))}</span>`
         : "";
+      const valueLinks = Array.isArray(entry?.valueLinks) ? entry.valueLinks : [];
+      const valueHtml =
+        valueLinks.length > 0
+          ? valueLinks
+              .map((valueLink) => {
+                const valueCommandUri = String(valueLink?.commandUri || "").trim();
+                const valueLabel = String(valueLink?.label || "").trim();
+                if (!valueCommandUri) {
+                  return escapeHtml(String(valueLink?.value || ""));
+                }
+                return `<a class="doc-variable-value-link" href="${escapeHtmlAttribute(valueCommandUri)}"${
+                  valueLabel ? ` title="${escapeHtmlAttribute(valueLabel)}"` : ""
+                }>${escapeHtml(String(valueLink?.value || ""))}</a>`;
+              })
+              .join('<span class="doc-variable-value-separator"> | </span>')
+          : `${hintHtml}${escapeHtml(String(entry?.valuePreview || "(empty)"))}`;
+      const prefixedValueHtml = valueLinks.length > 0 ? `${hintHtml}${valueHtml}` : valueHtml;
 
       return `<li class="doc-variable-row${commandUri ? " doc-clickable" : ""}" ${rowAttributes.join(" ")}>
-                <code class="doc-variable-name">${escapeHtml(String(entry?.variableToken || ""))}</code>: <span class="doc-variable-value">${hintHtml}${escapeHtml(String(entry?.valuePreview || "(empty)"))}</span>
+                <code class="doc-variable-name">${escapeHtml(String(entry?.variableToken || ""))}</code>: <span class="doc-variable-value">${prefixedValueHtml}</span>
               </li>`;
     })
     .join("\n");
