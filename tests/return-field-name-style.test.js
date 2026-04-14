@@ -890,6 +890,84 @@ async function runLargeFixtureRenderTargetTests() {
   }
 }
 
+async function runDocumentationVariableSectionRenderTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case With Variables
+    [Documentation]    Intro section
+    VAR    \${plainDate}    2022-01-01
+    VAR    \${typedDate: date}    2022-01-02
+    \${computedLabel}=    Set Variable    hello world
+    Log    \${plainDate}
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+  const block = parsed.blocks[0];
+
+  assert.strictEqual(block.variableAssignments.length, 3);
+
+  const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), block);
+  assert(renderedHtml.includes("Variables"), "expected rendered documentation to include a Variables section");
+  assert(renderedHtml.includes("${plainDate}"));
+  assert(renderedHtml.includes("${typedDate: date}"));
+  assert(renderedHtml.includes("${computedLabel}"));
+  assert(renderedHtml.includes("2022-01-01"));
+  assert(renderedHtml.includes("2022-01-02"));
+  assert(renderedHtml.includes("hello world"));
+  assert(renderedHtml.includes("`${plainDate}`"));
+  assert(!renderedHtml.includes("`2022-01-01`"));
+  assert(!renderedHtml.includes("(Set Variable"));
+  assert(!renderedHtml.includes("(VAR"));
+  assert(!renderedHtml.includes("(line "));
+  assert(
+    renderedHtml.indexOf("Variables") > renderedHtml.indexOf("Intro section"),
+    "expected Variables section to be rendered after the documentation content"
+  );
+
+  const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
+  const headingCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 3);
+  const varCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 3);
+  const typedVarCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 4);
+  const setVariableCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 5);
+
+  assert(
+    decodedTargets.some(
+      (target) =>
+        target.kind === "heading" &&
+        target.commandUri === headingCommandUri &&
+        String(target.label || "").includes("starting at line 4")
+    ),
+    "expected Variables heading to point to the first local variable definition"
+  );
+  assert(
+    decodedTargets.some(
+      (target) =>
+        target.kind === "list-item" &&
+        target.commandUri === varCommandUri &&
+        String(target.label || "") === "Open VAR line 4"
+    ),
+    "expected VAR assignment target in documentation variables section"
+  );
+  assert(
+    decodedTargets.some(
+      (target) =>
+        target.kind === "list-item" &&
+        target.commandUri === typedVarCommandUri &&
+        String(target.label || "") === "Open VAR line 5"
+    ),
+    "expected typed VAR assignment target in documentation variables section"
+  );
+  assert(
+    decodedTargets.some(
+      (target) =>
+        target.kind === "list-item" &&
+        target.commandUri === setVariableCommandUri &&
+        String(target.label || "") === "Open Set Variable line 6"
+    ),
+    "expected Set Variable assignments to stay available in documentation variables section"
+  );
+}
+
 function runRobot7VarAssignmentHoverTests() {
   const document = createMockRobotDocument(`
 *** Test Cases ***

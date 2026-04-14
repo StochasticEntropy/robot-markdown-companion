@@ -1272,11 +1272,27 @@ class RobotDocumentationService {
 
     const variableAssignments = parseVariableAssignments(lines, ownerByLine);
     const keywordCallAssignments = parseKeywordCallAssignments(lines, ownerByLine);
+    const variableAssignmentsByOwnerId = new Map();
+    for (const assignment of variableAssignments) {
+      const ownerId = String(assignment?.ownerId || "");
+      if (!ownerId) {
+        continue;
+      }
+      const ownerAssignments = variableAssignmentsByOwnerId.get(ownerId) || [];
+      ownerAssignments.push(assignment);
+      variableAssignmentsByOwnerId.set(ownerId, ownerAssignments);
+    }
+    const enrichedBlocks = blocks.map((block) => ({
+      ...block,
+      variableAssignments: [...(variableAssignmentsByOwnerId.get(block.ownerId) || [])].sort(
+        (left, right) => Number(left?.startLine) - Number(right?.startLine)
+      )
+    }));
     const parsed = {
       uri: document.uri.toString(),
       version: document.version,
       fileName: path.basename(document.uri.fsPath || document.uri.path || document.uri.toString()),
-      blocks,
+      blocks: enrichedBlocks,
       owners,
       variableAssignments,
       keywordCallAssignments
@@ -13239,6 +13255,67 @@ function buildDocumentationRenderItemsForFragment(documentUri, fragment) {
   return items;
 }
 
+function formatDocumentationVariableValuePreview(valueRaw) {
+  const normalizedParts = String(valueRaw || "")
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (normalizedParts.length === 0) {
+    return "(empty)";
+  }
+  const collapsed = normalizedParts.join(" | ");
+  if (collapsed.length <= 140) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, 137).trimEnd()}...`;
+}
+
+function escapeMarkdownText(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/([*_#[\]()<>|])/g, "\\$1");
+}
+
+function buildDocumentationVariableRenderItems(documentUri, block) {
+  const assignments = [...(Array.isArray(block?.variableAssignments) ? block.variableAssignments : [])].sort(
+    (left, right) => Number(left?.startLine) - Number(right?.startLine)
+  );
+  if (assignments.length === 0) {
+    return [];
+  }
+
+  const items = [
+    createDocumentationRenderItem("blank", [""]),
+    createDocumentationRenderItem("heading", ["## Variables"], {
+      commandUri: buildOpenLocationCommandUri(documentUri, assignments[0].startLine),
+      label: `Open variable definitions starting at line ${assignments[0].startLine + 1}`
+    }),
+    createDocumentationRenderItem("blank", [""])
+  ];
+
+  for (const assignment of assignments) {
+    const variableToken = String(assignment?.variableToken || "").trim();
+    if (!variableToken) {
+      continue;
+    }
+
+    const sourceLine = Math.max(0, Number(assignment?.startLine) || 0);
+    const valuePreview = formatDocumentationVariableValuePreview(assignment?.valueRaw);
+    items.push(
+      createDocumentationRenderItem(
+        "list-item",
+        [`- \`${escapeMarkdownInline(variableToken)}\`: ${escapeMarkdownText(valuePreview)}`],
+        {
+          commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+          label: `Open ${getLocalVariableAssignmentSourceLabel(assignment)} line ${sourceLine + 1}`
+        }
+      )
+    );
+  }
+
+  return items;
+}
+
 function buildDocumentationRenderData(documentUri, block) {
   const fragments =
     Array.isArray(block?.fragments) && block.fragments.length > 0
@@ -13259,6 +13336,7 @@ function buildDocumentationRenderData(documentUri, block) {
     const items = buildDocumentationRenderItemsForFragment(documentUri, fragment);
     rawItems.push(...items);
   }
+  rawItems.push(...buildDocumentationVariableRenderItems(documentUri, block));
 
   const mergedItems = [];
   for (const item of rawItems) {

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.72
+
+- Simplified the documentation view Variables section so entries render as `variable: value` without the visible `(source, line)` annotation text.
+- Kept both `VAR` and `Set Variable` definitions in the Variables section, while leaving line navigation available through the clickable entries.
+- Added regression coverage for the lighter Variables-section presentation.
+
+## 0.4.71
+
+- Added a Variables section to the documentation view so locally defined `VAR` and `Set Variable` values are shown at the end of the rendered documentation block.
+- Each variable entry links back to its defining line for quick navigation from the documentation preview.
+- Added regression coverage for documentation rendering and source-target mapping of the new variables section.
+
 ## 0.4.70
 
 - Kept hover, the documentation preview, and the documentation views available during Robot debug sessions instead of pausing them completely.
