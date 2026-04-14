@@ -825,6 +825,14 @@ function decodeDocumentationRenderTargets(renderedHtml) {
   return JSON.parse(decodeURIComponent(targetMatch[1]));
 }
 
+function extractRenderedSection(renderedHtml, markerFragment) {
+  const match = String(renderedHtml || "").match(
+    new RegExp(`<section[^>]*${markerFragment}[^>]*>[\\s\\S]*?<\\/section>`)
+  );
+  assert(match, `expected rendered HTML to include section matching ${markerFragment}`);
+  return match[0];
+}
+
 async function runLargeFixtureRenderTargetTests() {
   const fixtureExpectations = [
     {
@@ -898,74 +906,277 @@ Case With Variables
     VAR    \${plainDate}    2022-01-01
     VAR    \${typedDate: date}    2022-01-02
     \${computedLabel}=    Set Variable    hello world
+    IF    \${flag}
+        \${branchMaybe}=    Set Variable    ALPHA
+    ELSE
+        \${branchMaybe}=    Set Variable    \${None}
+    END
+    IF    \${checkPdf}
+        \${pdfContent}=    Keyword Read Pdf
+    ELSE
+        \${pdfContent}=    Set Variable    \${None}
+    END
+    \${timelineDate}=    Set Variable    2025-04-01
+    \${timelineDate}=    Set Variable    2025-05-01
+    \${repeatedNone}=    Set Variable    \${None}
+    \${repeatedNone}=    Set Variable    \${None}
+    \${returnedValue}=    Keyword Alpha
+    \${returnedValue}=    Keyword Beta
     Log    \${plainDate}
 `);
   const parser = new extensionTestApi.RobotDocumentationService();
   const parsed = parser.parse(document);
   const block = parsed.blocks[0];
 
-  assert.strictEqual(block.variableAssignments.length, 3);
-
+  assert.strictEqual(block.variableAssignments.length, 10);
   const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), block);
   assert(renderedHtml.includes("Variables"), "expected rendered documentation to include a Variables section");
+  assert(renderedHtml.includes("Returned Variables"), "expected rendered documentation to include a returned section");
   assert(renderedHtml.includes("${plainDate}"));
   assert(renderedHtml.includes("${typedDate: date}"));
   assert(renderedHtml.includes("${computedLabel}"));
   assert(renderedHtml.includes("2022-01-01"));
   assert(renderedHtml.includes("2022-01-02"));
   assert(renderedHtml.includes("hello world"));
-  assert(renderedHtml.includes("`${plainDate}`"));
-  assert(!renderedHtml.includes("`2022-01-01`"));
-  assert(!renderedHtml.includes("(Set Variable"));
-  assert(!renderedHtml.includes("(VAR"));
-  assert(!renderedHtml.includes("(line "));
+  assert(renderedHtml.includes("ALPHA | ${None}"));
+  assert(renderedHtml.includes("Return from Keyword Read Pdf | ${None}"));
+  assert(renderedHtml.includes("2025-04-01 | 2025-05-01"));
+  assert(renderedHtml.includes("Ambiguous"));
+  assert(renderedHtml.includes('data-preview-toggle-section="returned-variables"'));
+  assert(renderedHtml.includes("hidden"));
   assert(
     renderedHtml.indexOf("Variables") > renderedHtml.indexOf("Intro section"),
     "expected Variables section to be rendered after the documentation content"
   );
 
-  const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
-  const headingCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 3);
+  const localSectionHtml = extractRenderedSection(renderedHtml, "doc-variable-section-primary");
+  const returnedSectionHtml = extractRenderedSection(renderedHtml, 'data-preview-toggle-section="returned-variables"');
+  const localHeadingCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 3);
   const varCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 3);
   const typedVarCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 4);
   const setVariableCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 5);
+  const timelineDateCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 16);
+  const repeatedNoneCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 19);
+  const returnedPdfCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 12);
+  const returnedFirstCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 20);
+  const returnedSecondCommandUri = extensionTestApi.buildOpenLocationCommandUri(document.uri.toString(), 21);
 
+  assert(localSectionHtml.includes(localHeadingCommandUri), "expected Variables heading to point to the first local variable definition");
+  assert(localSectionHtml.includes(varCommandUri), "expected VAR assignment target in documentation variables section");
+  assert(localSectionHtml.includes(typedVarCommandUri), "expected typed VAR assignment target in documentation variables section");
+  assert(localSectionHtml.includes(setVariableCommandUri), "expected Set Variable assignment target in documentation variables section");
+  assert(localSectionHtml.includes("${timelineDate}"));
+  assert(localSectionHtml.includes("2025-04-01 | 2025-05-01"));
+  assert(localSectionHtml.includes(timelineDateCommandUri), "expected ambiguous multi-assignment variables to jump to the first definition");
+  assert(localSectionHtml.includes(repeatedNoneCommandUri), "expected latest repeated None assignment to be the summary source");
+  assert.strictEqual((localSectionHtml.match(/\$\{repeatedNone\}/g) || []).length, 1);
+  assert(localSectionHtml.includes("${pdfContent}"));
+  assert(localSectionHtml.includes("Return from Keyword Read Pdf | ${None}"));
+  assert(localSectionHtml.includes("Show Returned Variables"));
+  assert(localSectionHtml.includes('data-preview-toggle-target="returned-variables"'));
+  assert(!localSectionHtml.includes("Keyword Alpha"));
+  assert(!localSectionHtml.includes("Keyword Beta"));
+
+  assert(returnedSectionHtml.includes(returnedPdfCommandUri), "expected mixed keyword-return source link");
+  assert(returnedSectionHtml.includes(returnedFirstCommandUri), "expected first returned variable source link");
+  assert(returnedSectionHtml.includes(returnedSecondCommandUri), "expected second returned variable source link");
+  assert(returnedSectionHtml.includes("Return from Keyword Read Pdf"));
+  assert(returnedSectionHtml.includes("Return from Keyword Alpha"));
+  assert(returnedSectionHtml.includes("Return from Keyword Beta"));
   assert(
-    decodedTargets.some(
-      (target) =>
-        target.kind === "heading" &&
-        target.commandUri === headingCommandUri &&
-        String(target.label || "").includes("starting at line 4")
-    ),
-    "expected Variables heading to point to the first local variable definition"
+    returnedSectionHtml.indexOf("Return from Keyword Read Pdf") < returnedSectionHtml.indexOf("Return from Keyword Alpha") &&
+      returnedSectionHtml.indexOf("Return from Keyword Alpha") < returnedSectionHtml.indexOf("Return from Keyword Beta"),
+    "expected returned variables to stay chronological"
   );
-  assert(
-    decodedTargets.some(
-      (target) =>
-        target.kind === "list-item" &&
-        target.commandUri === varCommandUri &&
-        String(target.label || "") === "Open VAR line 4"
-    ),
-    "expected VAR assignment target in documentation variables section"
+}
+
+function runConditionalVariableResolutionTests() {
+  const parser = new extensionTestApi.RobotDocumentationService();
+
+  const ifElseDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Conditional Value
+    IF    \${flag}
+        \${pdfContent}=    Set Variable    PDF_READY
+    ELSE
+        \${pdfContent}=    Set Variable    \${None}
+    END
+    Log    \${pdfContent}
+`);
+  const ifElseParsed = parser.parse(ifElseDocument);
+  assert.strictEqual(ifElseParsed.variableAssignments.length, 2);
+  assert.strictEqual(ifElseParsed.variableAssignments[0].branchGroupId, ifElseParsed.variableAssignments[1].branchGroupId);
+  assert.notStrictEqual(ifElseParsed.variableAssignments[0].branchId, ifElseParsed.variableAssignments[1].branchId);
+
+  const ifElseHover = extensionTestApi.createVariableValueHover(
+    ifElseDocument,
+    ifElseParsed,
+    {
+      line: 7,
+      character: ifElseDocument.lineAt(7).text.indexOf("${pdfContent}") + 3
+    }
   );
-  assert(
-    decodedTargets.some(
-      (target) =>
-        target.kind === "list-item" &&
-        target.commandUri === typedVarCommandUri &&
-        String(target.label || "") === "Open VAR line 5"
-    ),
-    "expected typed VAR assignment target in documentation variables section"
+  assert(ifElseHover, "expected hover for conditional local variable");
+  assert.match(ifElseHover.contents[0].value, /\*\*Current value \(conditional\):\*\*/);
+  assert.match(ifElseHover.contents[0].value, /`PDF_READY`/);
+  assert.match(ifElseHover.contents[0].value, /`\$\{None\}`/);
+  assert.doesNotMatch(ifElseHover.contents[0].value, /Current value \(resolved\)/);
+
+  const conditionalCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${pdfContent}",
+      valueStart: 0
+    },
+    ifElseParsed,
+    7
   );
-  assert(
-    decodedTargets.some(
-      (target) =>
-        target.kind === "list-item" &&
-        target.commandUri === setVariableCommandUri &&
-        String(target.label || "") === "Open Set Variable line 6"
-    ),
-    "expected Set Variable assignments to stay available in documentation variables section"
+  assert.strictEqual(conditionalCurrentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    conditionalCurrentValue.candidates.map((candidate) => candidate.value),
+    ["PDF_READY", "${None}"]
   );
+
+  const conditionalMarkdown = extensionTestApi.buildEnumPreviewMarkdown({
+    argumentName: "pdfContent",
+    argumentValue: "${pdfContent}",
+    currentValueKind: conditionalCurrentValue.kind,
+    currentValueCandidates: conditionalCurrentValue.candidates,
+    currentValue: "",
+    currentValueSource: "",
+    shownEnums: [],
+    annotationHints: [],
+    documentUri: ifElseDocument.uri.toString(),
+    showArgumentAssignment: true,
+    showResolvedCurrentValue: true
+  });
+  assert.match(conditionalMarkdown, /Current value \(conditional\):/);
+  assert.match(conditionalMarkdown, /`PDF_READY`/);
+  assert.match(conditionalMarkdown, /`\$\{None\}`/);
+  assert.doesNotMatch(conditionalMarkdown, /Resolved current value:/);
+
+  const keywordBranchDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Conditional Keyword Branch
+    IF    \${checkPdf}
+        \${pdfContent}=    MTEXT PDF Lesen Von TrackingId
+        ...    trackingId=\${trackingId}
+    ELSE
+        \${pdfContent}=    Set Variable    \${None}
+    END
+    Keyword Under Test    pdfInhalt=\${pdfContent}
+`);
+  const keywordBranchParsed = parser.parse(keywordBranchDocument);
+  const keywordBranchCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${pdfContent}",
+      valueStart: "    Keyword Under Test    pdfInhalt=".length
+    },
+    keywordBranchParsed,
+    8
+  );
+  assert.strictEqual(keywordBranchCurrentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    keywordBranchCurrentValue.candidates.map((candidate) => candidate.value),
+    ["Return from MTEXT PDF Lesen Von TrackingId", "${None}"]
+  );
+
+  const keywordBranchMarkdown = extensionTestApi.buildEnumPreviewMarkdown({
+    argumentName: "pdfInhalt",
+    argumentValue: "${pdfContent}",
+    currentValueKind: keywordBranchCurrentValue.kind,
+    currentValueCandidates: keywordBranchCurrentValue.candidates,
+    currentValue: "",
+    currentValueSource: "",
+    shownEnums: [],
+    annotationHints: [],
+    documentUri: keywordBranchDocument.uri.toString(),
+    showArgumentAssignment: true,
+    showResolvedCurrentValue: true
+  });
+  assert.match(keywordBranchMarkdown, /Current value \(conditional\):/);
+  assert.match(keywordBranchMarkdown, /Return from MTEXT PDF Lesen Von TrackingId/);
+  assert.match(keywordBranchMarkdown, /`\$\{None\}`/);
+
+  const elseIfDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Else If
+    IF    \${mode} == 1
+        \${branchValue}=    Set Variable    ALPHA
+    ELSE IF    \${mode} == 2
+        \${branchValue}=    Set Variable    BETA
+    ELSE
+        \${branchValue}=    Set Variable    GAMMA
+    END
+    Log    \${branchValue}
+`);
+  const elseIfParsed = parser.parse(elseIfDocument);
+  const elseIfCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${branchValue}",
+      valueStart: 0
+    },
+    elseIfParsed,
+    9
+  );
+  assert.strictEqual(elseIfCurrentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    elseIfCurrentValue.candidates.map((candidate) => candidate.value),
+    ["ALPHA", "BETA", "GAMMA"]
+  );
+
+  const nestedDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Nested Conditional
+    IF    \${outer}
+        IF    \${inner}
+            \${nestedValue}=    Set Variable    FIRST
+        ELSE
+            \${nestedValue}=    Set Variable    SECOND
+        END
+    ELSE
+        \${nestedValue}=    Set Variable    THIRD
+    END
+    Log    \${nestedValue}
+`);
+  const nestedParsed = parser.parse(nestedDocument);
+  const nestedCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${nestedValue}",
+      valueStart: 0
+    },
+    nestedParsed,
+    11
+  );
+  assert.strictEqual(nestedCurrentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    nestedCurrentValue.candidates.map((candidate) => candidate.value),
+    ["FIRST", "SECOND", "THIRD"]
+  );
+
+  const overwriteDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Conditional Overwrite
+    IF    \${flag}
+        \${finalValue}=    Set Variable    BEFORE
+    ELSE
+        \${finalValue}=    Set Variable    \${None}
+    END
+    \${finalValue}=    Set Variable    AFTER
+    Log    \${finalValue}
+`);
+  const overwriteParsed = parser.parse(overwriteDocument);
+  const overwriteHover = extensionTestApi.createVariableValueHover(
+    overwriteDocument,
+    overwriteParsed,
+    {
+      line: 8,
+      character: overwriteDocument.lineAt(8).text.indexOf("${finalValue}") + 3
+    }
+  );
+  assert(overwriteHover, "expected hover for overwritten variable");
+  assert.match(overwriteHover.contents[0].value, /Current value \(resolved\)/);
+  assert.match(overwriteHover.contents[0].value, /`AFTER`/);
+  assert.doesNotMatch(overwriteHover.contents[0].value, /Current value \(conditional\)/);
 }
 
 function runRobot7VarAssignmentHoverTests() {
@@ -1364,11 +1575,15 @@ Keyword TieredClassicDoc
 function runDocumentationPreviewActionLinkTests() {
   const documentUri = "file:///tmp/folding.robot";
   const encodedArgs = encodeURIComponent(JSON.stringify([documentUri]));
-  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri);
+  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri, {
+    hasReturnedVariables: true
+  });
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToHeadlines\\?${encodedArgs}`));
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSteps\\?${encodedArgs}`));
   assert.match(previewActions, />Headlines</);
   assert.match(previewActions, />Steps</);
+  assert.doesNotMatch(previewActions, /Show Returned Variables/);
+  assert.doesNotMatch(previewActions, /data-preview-toggle-target=\"returned-variables\"/);
   assert.doesNotMatch(previewActions, /foldDocumentationToFirstLevel/);
   assert.doesNotMatch(previewActions, /foldDocumentationToSecondLevel/);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.unfoldDocumentation\\?${encodedArgs}`));
@@ -1421,6 +1636,8 @@ async function main() {
   await runInlineDocumentationTests();
   await runIndentedInlineDocumentationTests();
   await runLargeFixtureRenderTargetTests();
+  await runDocumentationVariableSectionRenderTests();
+  runConditionalVariableResolutionTests();
   runRobot7VarAssignmentHoverTests();
   runDocumentationFoldingTests();
   runDocumentationBodyFoldingTests();

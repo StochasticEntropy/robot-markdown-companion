@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.78
+
+- Updated the documentation preview Variables section to mark a variable as ambiguous whenever the testcase contains multiple distinct assignments for it, not just conditional branch conflicts.
+- Mixed cases that combine keyword-return assignments and `Set Variable` assignments now show all distinct values in the Variables section.
+- Sequential reassignments like `01.04.2025` and `01.05.2025` now also render as an ambiguous combined row in the testcase-level Variables view.
+
+## 0.4.77
+
+- Fixed the documentation preview Variables section so mixed branch cases can resolve across local `Set Variable` assignments and keyword-return assignments for the same variable.
+- Ambiguous rows like `${PdfInhalt}` now show combined possible values instead of incorrectly collapsing to `${None}` when one branch comes from a keyword return.
+
+## 0.4.76
+
+- Tightened the documentation preview Variables section spacing to restore the denser, easier-to-scan bullet-list presentation.
+- Reduced row, heading, and toggle spacing in the variable sections so long lists read more like the earlier preview style.
+
+## 0.4.75
+
+- Restored the documentation preview Variables section to the simpler bullet-list style for easier scanning.
+- Moved the returned-variable toggle out of the preview action bar and into the Variables section so it applies only to the currently shown testcase/keyword.
+- Returned variables now stay hidden by default and expand only within the current preview block when requested.
+
+## 0.4.74
+
+- Split the documentation preview variable area into a merged local `Variables` section and a separate toggleable `Returned Variables` section.
+- The main Variables section now stays focused on `VAR` and `Set Variable`, collapsing duplicate end states and showing compact ambiguity hints for conditional values.
+- Added regression coverage for the new preview toggle, local-only summary rendering, and returned-variable history behavior.
+
+## 0.4.73
+
+- Added conditional local-variable resolution for `IF/ELSE/ELSE IF` branches so hover and argument hints no longer collapse to a misleading single branch value like `${None}`.
+- Local variable hover and named-argument current-value hints now show multiple candidate values when a variable is assigned in mutually exclusive branches before use.
+- Added regression coverage for two-branch, `ELSE IF`, nested branch, and post-`END` overwrite scenarios.
+
 ## 0.4.72
 
 - Simplified the documentation view Variables section so entries render as `variable: value` without the visible `(source, line)` annotation text.

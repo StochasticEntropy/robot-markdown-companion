@@ -1269,10 +1269,12 @@ class RobotDocumentationService {
     const lines = document.getText().split(/\r?\n/);
     const { owners, ownerByLine } = buildOwnerScopes(lines);
     const blocks = buildDocumentationBlocks(lines, owners, ownerByLine);
+    const branchPathByLine = buildConditionalBranchPathByLine(lines, ownerByLine);
 
-    const variableAssignments = parseVariableAssignments(lines, ownerByLine);
-    const keywordCallAssignments = parseKeywordCallAssignments(lines, ownerByLine);
+    const variableAssignments = parseVariableAssignments(lines, ownerByLine, branchPathByLine);
+    const keywordCallAssignments = parseKeywordCallAssignments(lines, ownerByLine, branchPathByLine);
     const variableAssignmentsByOwnerId = new Map();
+    const keywordCallAssignmentsByOwnerId = new Map();
     for (const assignment of variableAssignments) {
       const ownerId = String(assignment?.ownerId || "");
       if (!ownerId) {
@@ -1282,9 +1284,21 @@ class RobotDocumentationService {
       ownerAssignments.push(assignment);
       variableAssignmentsByOwnerId.set(ownerId, ownerAssignments);
     }
+    for (const assignment of keywordCallAssignments) {
+      const ownerId = String(assignment?.ownerId || "");
+      if (!ownerId) {
+        continue;
+      }
+      const ownerAssignments = keywordCallAssignmentsByOwnerId.get(ownerId) || [];
+      ownerAssignments.push(assignment);
+      keywordCallAssignmentsByOwnerId.set(ownerId, ownerAssignments);
+    }
     const enrichedBlocks = blocks.map((block) => ({
       ...block,
       variableAssignments: [...(variableAssignmentsByOwnerId.get(block.ownerId) || [])].sort(
+        (left, right) => Number(left?.startLine) - Number(right?.startLine)
+      ),
+      keywordCallAssignments: [...(keywordCallAssignmentsByOwnerId.get(block.ownerId) || [])].sort(
         (left, right) => Number(left?.startLine) - Number(right?.startLine)
       )
     }));
@@ -1294,6 +1308,7 @@ class RobotDocumentationService {
       fileName: path.basename(document.uri.fsPath || document.uri.path || document.uri.toString()),
       blocks: enrichedBlocks,
       owners,
+      branchPathByLine,
       variableAssignments,
       keywordCallAssignments
     };
@@ -3892,6 +3907,19 @@ class RobotDocPreviewViewProvider {
     .preview-actions a:hover {
       text-decoration: underline;
     }
+    .preview-action-button {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--vscode-textLink-foreground);
+      font: inherit;
+      margin: 0;
+      padding: 0;
+      cursor: pointer;
+    }
+    .preview-action-button:hover {
+      text-decoration: underline;
+    }
     .preview-actions-label {
       color: var(--vscode-descriptionForeground);
     }
@@ -4021,6 +4049,57 @@ class RobotDocPreviewViewProvider {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 2px;
     }
+    .preview .doc-variable-section {
+      margin-top: 10px;
+    }
+    .preview .doc-variable-section-secondary {
+      padding-top: 8px;
+      border-top: 1px solid var(--vscode-widget-border);
+    }
+    .preview .doc-variable-section-title {
+      margin: 0 0 4px 0;
+      font-size: 1.15em;
+      line-height: 1.3;
+    }
+    .preview .doc-variable-section-title a {
+      color: inherit;
+      text-decoration: none;
+    }
+    .preview .doc-variable-section-title a:hover {
+      text-decoration: underline;
+    }
+    .preview .doc-variable-list {
+      list-style: disc;
+      margin: 0 0 4px 0;
+      padding-left: 18px;
+    }
+    .preview .doc-variable-row {
+      margin: 0 0 1px 0;
+      padding: 0 2px 0 0;
+      border-radius: 4px;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .preview .doc-variable-value {
+      overflow-wrap: anywhere;
+    }
+    .preview .doc-variable-hint {
+      display: inline-block;
+      margin-right: 8px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 0.78em;
+      line-height: 1.5;
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      vertical-align: baseline;
+    }
+    .preview .doc-variable-toggle-row {
+      margin-top: 6px;
+    }
+    .preview .doc-variable-toggle-button {
+      font-size: 0.95em;
+    }
     .preview .doc-inline-heading {
       margin-bottom: 0.4em;
     }
@@ -4085,6 +4164,51 @@ class RobotDocPreviewViewProvider {
 
         element.innerHTML = rebuilt.join('');
       }
+
+      const syncPreviewToggleButtons = () => {
+        const toggleButtons = document.querySelectorAll('[data-preview-toggle-target]');
+        for (const button of toggleButtons) {
+          const targetKey = String(button.getAttribute('data-preview-toggle-target') || '').trim();
+          if (!targetKey) {
+            continue;
+          }
+
+          const targetSection = document.querySelector('[data-preview-toggle-section="' + targetKey + '"]');
+          const isExpanded = targetSection instanceof HTMLElement ? !targetSection.hidden : false;
+          const showLabel = String(button.getAttribute('data-preview-toggle-show-label') || 'Show');
+          const hideLabel = String(button.getAttribute('data-preview-toggle-hide-label') || 'Hide');
+          button.textContent = isExpanded ? hideLabel : showLabel;
+          button.setAttribute('aria-expanded', String(isExpanded));
+          button.setAttribute('aria-pressed', String(isExpanded));
+        }
+      };
+
+      const attachPreviewToggleHandlers = () => {
+        const toggleButtons = document.querySelectorAll('[data-preview-toggle-target]');
+        for (const button of toggleButtons) {
+          button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const targetKey = String(button.getAttribute('data-preview-toggle-target') || '').trim();
+            if (!targetKey) {
+              return;
+            }
+            const targetSections = document.querySelectorAll('[data-preview-toggle-section="' + targetKey + '"]');
+            let nextExpanded = false;
+            for (const section of targetSections) {
+              if (!(section instanceof HTMLElement)) {
+                continue;
+              }
+              nextExpanded = section.hidden;
+              section.hidden = !section.hidden;
+            }
+            if (!nextExpanded && targetSections.length === 0) {
+              return;
+            }
+            syncPreviewToggleButtons();
+          });
+        }
+      };
 
       const attachDocumentationSourceTargets = () => {
         const blockSelector = 'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table';
@@ -4253,6 +4377,8 @@ class RobotDocPreviewViewProvider {
       };
 
       attachDocumentationSourceTargets();
+      attachPreviewToggleHandlers();
+      syncPreviewToggleButtons();
 
       const openSourceTarget = (commandUri) => {
         if (!commandUri) {
@@ -4321,7 +4447,7 @@ class RobotDocPreviewViewProvider {
   }
 }
 
-function buildDocumentationPreviewActionsHtml(documentUri) {
+function buildDocumentationPreviewActionsHtml(documentUri, options = {}) {
   if (!String(documentUri || "").trim()) {
     return "";
   }
@@ -5896,6 +6022,8 @@ function buildEnumPreviewMarkdown(context) {
   const showArgumentAssignment = context.showArgumentAssignment !== false;
   const showResolvedCurrentValue = context.showResolvedCurrentValue !== false;
   const showCurrentMemberMarker = context.showCurrentMemberMarker !== false;
+  const currentValueKind = String(context.currentValueKind || "single").trim().toLowerCase();
+  const currentValueCandidates = Array.isArray(context.currentValueCandidates) ? context.currentValueCandidates : [];
   const currentValue = String(context.currentValue || context.argumentValue || "").trim();
   const argumentValue = String(context.argumentValue || "").trim();
   const normalizedCurrentValue = currentValue.toLowerCase();
@@ -5937,29 +6065,53 @@ function buildEnumPreviewMarkdown(context) {
     lines.push("");
   }
 
-  if (showResolvedCurrentValue && currentValue.length > 0) {
-    if (argumentValue.length > 0 && argumentValue !== currentValue) {
-      lines.push(`Resolved current value: \`${resolvedCurrentValueDisplay}\` (from \`${argumentValue}\`).`);
-    } else {
-      lines.push(`Resolved current value: \`${resolvedCurrentValueDisplay}\`.`);
+  if (showResolvedCurrentValue) {
+    if (currentValueKind === "conditional" && currentValueCandidates.length > 0) {
+      lines.push("Current value (conditional):");
+      for (const candidate of currentValueCandidates) {
+        const sourceLineNumber =
+          Number.isFinite(Number(candidate?.sourceLine)) && Number(candidate.sourceLine) >= 0
+            ? Number(candidate.sourceLine) + 1
+            : undefined;
+        const displayValue = String(candidate?.value || "").trim() || "(empty)";
+        let line = `- \`${displayValue}\``;
+        if (sourceLineNumber) {
+          line += ` from \`${getLocalVariableAssignmentSourceLabel(candidate)}\` line ${sourceLineNumber}`;
+        }
+        lines.push(line);
+        const sourceCommand =
+          sourceLineNumber && context.documentUri
+            ? buildOpenLocationCommandUri(context.documentUri, Number(candidate.sourceLine))
+            : "";
+        if (sourceCommand) {
+          lines.push(`  [Jump to ${getLocalVariableAssignmentSourceLabel(candidate)} line ${sourceLineNumber}](${sourceCommand})`);
+        }
+      }
+      lines.push("");
+    } else if (currentValue.length > 0) {
+      if (argumentValue.length > 0 && argumentValue !== currentValue) {
+        lines.push(`Resolved current value: \`${resolvedCurrentValueDisplay}\` (from \`${argumentValue}\`).`);
+      } else {
+        lines.push(`Resolved current value: \`${resolvedCurrentValueDisplay}\`.`);
+      }
+      lines.push("");
     }
-    lines.push("");
-  }
 
-  if (
-    showResolvedCurrentValue &&
-    isLocalVariableCurrentValueSource(context.currentValueSource) &&
-    Number.isFinite(Number(context.currentValueSourceLine)) &&
-    Number(context.currentValueSourceLine) >= 0
-  ) {
-    const sourceLineNumber = Number(context.currentValueSourceLine) + 1;
-    const currentValueSourceLabel = getLocalVariableAssignmentSourceLabel(context);
-    lines.push(`Resolved from local \`${currentValueSourceLabel}\` at line ${sourceLineNumber}.`);
-    const setVariableCommand = buildOpenLocationCommandUri(context.documentUri, Number(context.currentValueSourceLine));
-    if (setVariableCommand) {
-      lines.push(`[Jump to ${currentValueSourceLabel} line ${sourceLineNumber}](${setVariableCommand})`);
+    if (
+      currentValueKind !== "conditional" &&
+      isLocalVariableCurrentValueSource(context.currentValueSource) &&
+      Number.isFinite(Number(context.currentValueSourceLine)) &&
+      Number(context.currentValueSourceLine) >= 0
+    ) {
+      const sourceLineNumber = Number(context.currentValueSourceLine) + 1;
+      const currentValueSourceLabel = getLocalVariableAssignmentSourceLabel(context);
+      lines.push(`Resolved from local \`${currentValueSourceLabel}\` at line ${sourceLineNumber}.`);
+      const setVariableCommand = buildOpenLocationCommandUri(context.documentUri, Number(context.currentValueSourceLine));
+      if (setVariableCommand) {
+        lines.push(`[Jump to ${currentValueSourceLabel} line ${sourceLineNumber}](${setVariableCommand})`);
+      }
+      lines.push("");
     }
-    lines.push("");
   }
 
   const provenanceNote = getEnumMatchProvenanceNote(context);
@@ -7030,7 +7182,133 @@ function buildOwnerScopes(lines) {
   };
 }
 
-function parseVariableAssignments(lines, ownerByLine) {
+function cloneBranchPath(branchPath) {
+  return (Array.isArray(branchPath) ? branchPath : []).map((frame) => ({
+    groupId: String(frame?.groupId || ""),
+    branchId: String(frame?.branchId || "")
+  }));
+}
+
+function parseConditionalBranchMarker(line) {
+  const cells = splitRobotCellsWithRanges(String(line || ""));
+  if (cells.length === 0) {
+    return undefined;
+  }
+
+  let cursor = 0;
+  while (cursor < cells.length && String(cells[cursor]?.text || "").trim() === "...") {
+    cursor += 1;
+  }
+
+  const keyword = String(cells[cursor]?.text || "")
+    .trim()
+    .toUpperCase();
+  if (keyword === "IF") {
+    return { kind: "if" };
+  }
+  if (keyword === "FOR") {
+    return { kind: "for" };
+  }
+  if (keyword === "WHILE") {
+    return { kind: "while" };
+  }
+  if (keyword === "TRY") {
+    return { kind: "try" };
+  }
+  if (keyword === "ELSE IF") {
+    return { kind: "else-if" };
+  }
+  if (keyword === "ELSE") {
+    return { kind: "else" };
+  }
+  if (keyword === "END") {
+    return { kind: "end" };
+  }
+  return undefined;
+}
+
+function buildConditionalBranchPathByLine(lines, ownerByLine) {
+  const branchPathByLine = Array.from({ length: lines.length }, () => []);
+  const ownerStates = new Map();
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const owner = ownerByLine[lineIndex];
+    if (!owner?.id) {
+      continue;
+    }
+
+    let ownerState = ownerStates.get(owner.id);
+    if (!ownerState) {
+      ownerState = {
+        branchStack: [],
+        controlStack: [],
+        groupSequence: 0,
+        branchSequence: 0
+      };
+      ownerStates.set(owner.id, ownerState);
+    }
+
+    branchPathByLine[lineIndex] = cloneBranchPath(
+      ownerState.branchStack.map((frame) => ({
+        groupId: frame.groupId,
+        branchId: frame.branchId
+      }))
+    );
+
+    const marker = parseConditionalBranchMarker(lines[lineIndex]);
+    if (!marker) {
+      continue;
+    }
+
+    if (marker.kind === "if") {
+      ownerState.groupSequence += 1;
+      ownerState.branchSequence += 1;
+      const groupId = `${owner.id}:if:${ownerState.groupSequence}`;
+      ownerState.controlStack.push({
+        kind: "if",
+        groupId
+      });
+      ownerState.branchStack.push({
+        groupId,
+        branchId: `${groupId}:branch:${ownerState.branchSequence}`
+      });
+      continue;
+    }
+
+    if (marker.kind === "for" || marker.kind === "while" || marker.kind === "try") {
+      ownerState.controlStack.push({
+        kind: marker.kind,
+        groupId: ""
+      });
+      continue;
+    }
+
+    if (marker.kind === "else-if" || marker.kind === "else") {
+      const currentControl = ownerState.controlStack[ownerState.controlStack.length - 1];
+      if (!currentControl || currentControl.kind !== "if") {
+        continue;
+      }
+      const currentFrame = ownerState.branchStack[ownerState.branchStack.length - 1];
+      if (!currentFrame || currentFrame.groupId !== currentControl.groupId) {
+        continue;
+      }
+      ownerState.branchSequence += 1;
+      currentFrame.branchId = `${currentFrame.groupId}:branch:${ownerState.branchSequence}`;
+      continue;
+    }
+
+    if (marker.kind === "end") {
+      const endedControl = ownerState.controlStack.pop();
+      if (endedControl?.kind === "if") {
+        ownerState.branchStack.pop();
+      }
+    }
+  }
+
+  return branchPathByLine;
+}
+
+function parseVariableAssignments(lines, ownerByLine, branchPathByLine = []) {
   const assignments = [];
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const owner = ownerByLine[lineIndex];
@@ -7047,14 +7325,17 @@ function parseVariableAssignments(lines, ownerByLine) {
       ...assignment,
       ownerId: owner.id,
       ownerName: owner.name,
-      section: owner.section
+      section: owner.section,
+      branchPath: cloneBranchPath(branchPathByLine[lineIndex]),
+      branchGroupId: String(branchPathByLine[lineIndex]?.[branchPathByLine[lineIndex].length - 1]?.groupId || ""),
+      branchId: String(branchPathByLine[lineIndex]?.[branchPathByLine[lineIndex].length - 1]?.branchId || "")
     });
   }
 
   return assignments;
 }
 
-function parseKeywordCallAssignments(lines, ownerByLine) {
+function parseKeywordCallAssignments(lines, ownerByLine, branchPathByLine = []) {
   const assignments = [];
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const owner = ownerByLine[lineIndex];
@@ -7071,7 +7352,10 @@ function parseKeywordCallAssignments(lines, ownerByLine) {
       ...assignment,
       ownerId: owner.id,
       ownerName: owner.name,
-      section: owner.section
+      section: owner.section,
+      branchPath: cloneBranchPath(branchPathByLine[lineIndex]),
+      branchGroupId: String(branchPathByLine[lineIndex]?.[branchPathByLine[lineIndex].length - 1]?.groupId || ""),
+      branchId: String(branchPathByLine[lineIndex]?.[branchPathByLine[lineIndex].length - 1]?.branchId || "")
     });
 
     lineIndex = assignment.endLine;
@@ -7274,6 +7558,84 @@ function parseLocalVariableAssignment(lines, lineIndex) {
   return parseVarAssignment(lines, lineIndex) || parseSetVariableAssignment(lines, lineIndex);
 }
 
+function buildLocalVariableConditionalCandidates(selection) {
+  return (selection?.candidates || []).map((candidate) => {
+    const assignment = candidate?.assignment;
+    if (String(assignment?.assignmentKind || "") === "keyword-return") {
+      return {
+        value: `Return from ${String(assignment?.keywordName || "").trim() || "keyword"}`,
+        source: "keyword-return-variable",
+        sourceLabel: "Keyword return",
+        sourceLine: Number.isFinite(Number(assignment?.startLine)) ? Number(assignment.startLine) : undefined,
+        assignment
+      };
+    }
+    const value = extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw);
+    return {
+      value,
+      source: "local-variable",
+      sourceLabel: getLocalVariableAssignmentSourceLabel(assignment),
+      sourceLine: Number.isFinite(Number(assignment?.startLine)) ? Number(assignment.startLine) : undefined,
+      assignment
+    };
+  });
+}
+
+function buildLocalVariableCurrentValueResultFromSelection(selection, fallbackValue = "") {
+  if (!selection) {
+    return {
+      kind: "fallback",
+      value: String(fallbackValue || ""),
+      source: "argument",
+      sourceLine: undefined,
+      sourceLabel: "",
+      candidates: []
+    };
+  }
+
+  if (selection.kind === "single" && selection.assignment) {
+    if (String(selection.assignment?.assignmentKind || "") === "keyword-return") {
+      return {
+        kind: "fallback",
+        value: String(fallbackValue || ""),
+        source: "argument",
+        sourceLine: undefined,
+        sourceLabel: "",
+        candidates: []
+      };
+    }
+    return {
+      kind: "single",
+      value: extractCurrentValueFromSetVariableAssignment(selection.assignment.valueRaw),
+      source: "local-variable",
+      sourceLabel: getLocalVariableAssignmentSourceLabel(selection.assignment),
+      sourceLine: selection.assignment.startLine,
+      assignment: selection.assignment,
+      candidates: []
+    };
+  }
+
+  if (selection.kind === "conditional") {
+    return {
+      kind: "conditional",
+      value: "",
+      source: "local-variable-conditional",
+      sourceLine: undefined,
+      sourceLabel: "",
+      candidates: buildLocalVariableConditionalCandidates(selection)
+    };
+  }
+
+  return {
+    kind: "fallback",
+    value: String(fallbackValue || ""),
+    source: "argument",
+    sourceLine: undefined,
+    sourceLabel: "",
+    candidates: []
+  };
+}
+
 function createVariableValueHover(document, parsed, position, runtimeCacheService) {
   if (!parsed || !Array.isArray(parsed.owners) || !Array.isArray(parsed.variableAssignments)) {
     return undefined;
@@ -7292,26 +7654,23 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
 
   const normalizedVariable = normalizeVariableLookupToken(variableToken.token);
   const runtimeLookups = runtimeCacheService?.getLookupState(document, parsed);
-  const selectedAssignment = runtimeLookups
-    ? findLatestVariableAssignmentForOwnerFromLookups(
-        runtimeLookups,
-        owner.id,
-        normalizedVariable,
-        position.line
-      )
-    : findLatestVariableAssignmentForOwner(parsed, owner.id, normalizedVariable, position.line);
-
-  if (!selectedAssignment) {
+  const selectedResolution = resolveVariableAssignmentSelection(
+    parsed,
+    runtimeLookups,
+    owner.id,
+    normalizedVariable,
+    position.line
+  );
+  if (!selectedResolution) {
     return undefined;
   }
-
-  const valueLines =
-    selectedAssignment.valueRaw.length === 0 ? [] : selectedAssignment.valueRaw.split(/\r?\n/);
-  const lineLimit = getVariableHoverLineLimit();
-  const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
-  const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
-  const currentValueSummary = shownLines.length > 0 ? shownLines[0] : "";
-  const assignmentSourceLabel = getLocalVariableAssignmentSourceLabel(selectedAssignment);
+  const currentValueResolution = buildLocalVariableCurrentValueResultFromSelection(
+    selectedResolution,
+    variableToken.token
+  );
+  if (currentValueResolution.kind === "fallback") {
+    return undefined;
+  }
 
   const markdown = new vscode.MarkdownString();
   markdown.isTrusted = {
@@ -7319,40 +7678,74 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
   };
   markdown.supportHtml = false;
   markdown.appendMarkdown("### Robot Variable Value\n\n");
-  if (currentValueSummary.length > 0) {
-    markdown.appendMarkdown("**Current value (resolved):**  \n");
-    markdown.appendMarkdown(`🟢 \`${escapeMarkdownInline(currentValueSummary)}\`\n\n`);
-  } else {
-    markdown.appendMarkdown("**Current value (resolved):**  \n");
-    markdown.appendMarkdown("🟢 `(empty)`\n\n");
-  }
   markdown.appendMarkdown("**Variable:** ");
   markdown.appendText(variableToken.token);
   markdown.appendMarkdown("  \n");
   markdown.appendMarkdown("**Owner:** ");
   markdown.appendText(owner.name);
-  markdown.appendMarkdown("  \n");
-  markdown.appendMarkdown(`**Source:** \`${escapeMarkdownInline(assignmentSourceLabel)}\` at line ${selectedAssignment.startLine + 1}  \n`);
-  const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), selectedAssignment.startLine);
-  if (sourceCommand) {
-    markdown.appendMarkdown(
-      `[Jump to ${escapeMarkdownInline(assignmentSourceLabel)} line ${selectedAssignment.startLine + 1}](${sourceCommand})\n\n`
-    );
+  markdown.appendMarkdown("\n\n");
+
+  if (currentValueResolution.kind === "conditional") {
+    markdown.appendMarkdown("**Current value (conditional):**\n");
+    for (const candidate of currentValueResolution.candidates || []) {
+      const sourceLineNumber =
+        Number.isFinite(Number(candidate.sourceLine)) && Number(candidate.sourceLine) >= 0
+          ? Number(candidate.sourceLine) + 1
+          : undefined;
+      const displayValue = String(candidate.value || "").length > 0 ? String(candidate.value) : "(empty)";
+      markdown.appendMarkdown(`- \`${escapeMarkdownInline(displayValue)}\``);
+      if (sourceLineNumber) {
+        markdown.appendMarkdown(
+          ` from \`${escapeMarkdownInline(candidate.sourceLabel)}\` line ${sourceLineNumber}`
+        );
+        const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), Number(candidate.sourceLine));
+        if (sourceCommand) {
+          markdown.appendMarkdown(
+            `  \n  [Jump to ${escapeMarkdownInline(candidate.sourceLabel)} line ${sourceLineNumber}](${sourceCommand})`
+          );
+        }
+      }
+      markdown.appendMarkdown("\n");
+    }
   } else {
-    markdown.appendMarkdown("\n");
-  }
+    const selectedAssignment = currentValueResolution.assignment;
+    const valueLines =
+      selectedAssignment?.valueRaw?.length > 0 ? selectedAssignment.valueRaw.split(/\r?\n/) : [];
+    const lineLimit = getVariableHoverLineLimit();
+    const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
+    const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
+    const currentValueSummary = shownLines.length > 0 ? shownLines[0] : "";
+    const assignmentSourceLabel = getLocalVariableAssignmentSourceLabel(currentValueResolution);
 
-  if (shownLines.length === 0) {
-    markdown.appendMarkdown("_Assigned empty value._");
-  } else if (shownLines.length > 1) {
-    markdown.appendMarkdown("**Assigned value (full):**\n");
-    markdown.appendCodeblock(shownLines.join("\n"), "robotframework");
-  }
+    if (currentValueSummary.length > 0) {
+      markdown.appendMarkdown("**Current value (resolved):**  \n");
+      markdown.appendMarkdown(`🟢 \`${escapeMarkdownInline(currentValueSummary)}\`\n\n`);
+    } else {
+      markdown.appendMarkdown("**Current value (resolved):**  \n");
+      markdown.appendMarkdown("🟢 `(empty)`\n\n");
+    }
+    markdown.appendMarkdown(`**Source:** \`${escapeMarkdownInline(assignmentSourceLabel)}\` at line ${selectedAssignment.startLine + 1}  \n`);
+    const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), selectedAssignment.startLine);
+    if (sourceCommand) {
+      markdown.appendMarkdown(
+        `[Jump to ${escapeMarkdownInline(assignmentSourceLabel)} line ${selectedAssignment.startLine + 1}](${sourceCommand})\n\n`
+      );
+    } else {
+      markdown.appendMarkdown("\n");
+    }
 
-  if (isTruncated) {
-    markdown.appendMarkdown(
-      `\n\n_Showing first ${lineLimit} of ${valueLines.length} value lines in hover._`
-    );
+    if (shownLines.length === 0) {
+      markdown.appendMarkdown("_Assigned empty value._");
+    } else if (shownLines.length > 1) {
+      markdown.appendMarkdown("**Assigned value (full):**\n");
+      markdown.appendCodeblock(shownLines.join("\n"), "robotframework");
+    }
+
+    if (isTruncated) {
+      markdown.appendMarkdown(
+        `\n\n_Showing first ${lineLimit} of ${valueLines.length} value lines in hover._`
+      );
+    }
   }
 
   const range = new vscode.Range(position.line, variableToken.start, position.line, variableToken.end);
@@ -7718,26 +8111,20 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentContext, parsed
   }
 
   const normalizedVariable = normalizeVariableLookupToken(lookupToken);
-  const selectedAssignment = runtimeLookups
-    ? findLatestVariableAssignmentForOwnerFromLookups(runtimeLookups, owner.id, normalizedVariable, line)
-    : findLatestVariableAssignmentForOwner(parsed, owner.id, normalizedVariable, line);
-
-  if (!selectedAssignment) {
+  const selectedResolution = resolveVariableAssignmentSelection(parsed, runtimeLookups, owner.id, normalizedVariable, line);
+  if (!selectedResolution) {
     return fallback;
   }
 
-  const resolvedValue = extractCurrentValueFromSetVariableAssignment(selectedAssignment.valueRaw);
-  if (!resolvedValue) {
+  const resolvedResult = buildLocalVariableCurrentValueResultFromSelection(
+    selectedResolution,
+    hoveredVariableToken?.token || rawValue
+  );
+  if (resolvedResult.kind === "fallback") {
     return fallback;
   }
 
-  return {
-    value: resolvedValue,
-    source: "local-variable",
-    sourceLabel: getLocalVariableAssignmentSourceLabel(selectedAssignment),
-    sourceLine: selectedAssignment.startLine,
-    assignment: selectedAssignment
-  };
+  return resolvedResult;
 }
 
 function extractCurrentValueFromSetVariableAssignment(valueRaw) {
@@ -9916,35 +10303,233 @@ function findLatestAssignmentBeforeLine(assignments, line) {
   return best >= 0 ? assignments[best] : undefined;
 }
 
+function getBranchPathForLine(parsed, line) {
+  const paths = Array.isArray(parsed?.branchPathByLine) ? parsed.branchPathByLine : [];
+  return cloneBranchPath(paths[Math.max(0, Number(line) || 0)]);
+}
+
+function getVariableAssignmentsForOwner(parsed, runtimeLookups, ownerId, normalizedVariable) {
+  if (!ownerId || !normalizedVariable) {
+    return [];
+  }
+  if (runtimeLookups) {
+    const ownerMap = runtimeLookups.variableAssignmentsByOwnerAndVariable?.get(ownerId);
+    return [...(ownerMap?.get(normalizedVariable) || [])];
+  }
+
+  return (parsed?.variableAssignments || []).filter(
+    (assignment) => assignment.ownerId === ownerId && assignment.normalizedVariable === normalizedVariable
+  );
+}
+
+function getKeywordReturnAssignmentsForOwner(parsed, runtimeLookups, ownerId, normalizedVariable) {
+  if (!ownerId || !normalizedVariable) {
+    return [];
+  }
+  if (runtimeLookups) {
+    const ownerMap = runtimeLookups.keywordAssignmentsByOwnerAndVariable?.get(ownerId);
+    return [...(ownerMap?.get(normalizedVariable) || [])].filter(
+      (assignment) => normalizeKeywordName(assignment?.keywordName || "") !== "setvariable"
+    );
+  }
+
+  return (parsed?.keywordCallAssignments || []).filter(
+    (assignment) =>
+      assignment.ownerId === ownerId &&
+      normalizeKeywordName(assignment.keywordName || "") !== "setvariable" &&
+      Array.isArray(assignment.normalizedReturnVariables) &&
+      assignment.normalizedReturnVariables.includes(normalizedVariable)
+  );
+}
+
+function buildVariableDefinitionEntries(parsed, runtimeLookups, ownerId, normalizedVariable) {
+  return buildVariableDefinitionEntriesFromSources(
+    getVariableAssignmentsForOwner(parsed, runtimeLookups, ownerId, normalizedVariable),
+    getKeywordReturnAssignmentsForOwner(parsed, runtimeLookups, ownerId, normalizedVariable),
+    normalizedVariable
+  );
+}
+
+function findBranchFrameByGroupId(branchPath, groupId) {
+  return (Array.isArray(branchPath) ? branchPath : []).find((frame) => String(frame?.groupId || "") === String(groupId || ""));
+}
+
+function areBranchPathsEqual(left, right) {
+  const leftPath = Array.isArray(left) ? left : [];
+  const rightPath = Array.isArray(right) ? right : [];
+  if (leftPath.length !== rightPath.length) {
+    return false;
+  }
+  for (let index = 0; index < leftPath.length; index += 1) {
+    if (
+      String(leftPath[index]?.groupId || "") !== String(rightPath[index]?.groupId || "") ||
+      String(leftPath[index]?.branchId || "") !== String(rightPath[index]?.branchId || "")
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isAssignmentCompatibleWithBranchPath(assignment, branchPath) {
+  const assignmentPath = Array.isArray(assignment?.branchPath) ? assignment.branchPath : [];
+  const activePath = Array.isArray(branchPath) ? branchPath : [];
+  for (const frame of assignmentPath) {
+    const activeFrame = findBranchFrameByGroupId(activePath, frame.groupId);
+    if (activeFrame && String(activeFrame.branchId || "") !== String(frame?.branchId || "")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getDeepestInactiveBranchFrame(branchPath, activePath) {
+  const frames = Array.isArray(branchPath) ? branchPath : [];
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index];
+    const activeFrame = findBranchFrameByGroupId(activePath, frame.groupId);
+    if (!activeFrame) {
+      return {
+        frame,
+        index
+      };
+    }
+  }
+  return undefined;
+}
+
+function resolveVariableAssignmentSelectionFromAssignments(assignments, line, activeBranchPath) {
+  const compatibleAssignments = (Array.isArray(assignments) ? assignments : []).filter(
+    (assignment) =>
+      Number(assignment?.startLine) <= Number(line) && isAssignmentCompatibleWithBranchPath(assignment, activeBranchPath)
+  );
+  if (compatibleAssignments.length === 0) {
+    return undefined;
+  }
+
+  compatibleAssignments.sort((left, right) => Number(left?.startLine) - Number(right?.startLine));
+  const latestAssignment = compatibleAssignments[compatibleAssignments.length - 1];
+  const inactiveFrameInfo = getDeepestInactiveBranchFrame(latestAssignment?.branchPath, activeBranchPath);
+  if (!inactiveFrameInfo?.frame?.groupId) {
+    return {
+      kind: "single",
+      assignment: latestAssignment
+    };
+  }
+
+  const parentPath = cloneBranchPath((latestAssignment.branchPath || []).slice(0, inactiveFrameInfo.index));
+  const branchEntries = new Map();
+
+  for (const assignment of compatibleAssignments) {
+    const assignmentPath = Array.isArray(assignment?.branchPath) ? assignment.branchPath : [];
+    const targetIndex = assignmentPath.findIndex(
+      (frame) => String(frame?.groupId || "") === String(inactiveFrameInfo.frame.groupId || "")
+    );
+    if (targetIndex < 0) {
+      continue;
+    }
+    if (!areBranchPathsEqual(assignmentPath.slice(0, targetIndex), parentPath)) {
+      continue;
+    }
+    const branchFrame = assignmentPath[targetIndex];
+    const branchId = String(branchFrame?.branchId || "");
+    if (!branchId) {
+      continue;
+    }
+    const existing = branchEntries.get(branchId);
+    if (!existing || Number(branchFrame?.startLine || 0) < Number(existing.orderLine || Number.MAX_SAFE_INTEGER)) {
+      branchEntries.set(branchId, {
+        branchFrame,
+        orderLine: Number(assignment?.startLine) || 0
+      });
+    }
+  }
+
+  const branchResults = [];
+  const orderedBranchEntries = [...branchEntries.values()].sort((left, right) => left.orderLine - right.orderLine);
+  for (const branchEntry of orderedBranchEntries) {
+    const branchResult = resolveVariableAssignmentSelectionFromAssignments(assignments, line, [
+      ...parentPath,
+      {
+        groupId: String(branchEntry.branchFrame?.groupId || ""),
+        branchId: String(branchEntry.branchFrame?.branchId || "")
+      }
+    ]);
+    if (!branchResult) {
+      continue;
+    }
+    if (branchResult.kind === "single" && branchResult.assignment) {
+      branchResults.push(branchResult.assignment);
+      continue;
+    }
+    for (const candidate of branchResult.candidates || []) {
+      if (candidate?.assignment) {
+        branchResults.push(candidate.assignment);
+      }
+    }
+  }
+
+  const uniqueAssignments = [];
+  const seenAssignmentIds = new Set();
+  for (const assignment of branchResults) {
+    const key = String(assignment?.id || "");
+    if (!key || seenAssignmentIds.has(key)) {
+      continue;
+    }
+    seenAssignmentIds.add(key);
+    uniqueAssignments.push(assignment);
+  }
+
+  if (uniqueAssignments.length <= 1) {
+    return {
+      kind: "single",
+      assignment: uniqueAssignments[0] || latestAssignment
+    };
+  }
+
+  return {
+    kind: "conditional",
+    candidates: uniqueAssignments
+      .sort((left, right) => Number(left?.startLine) - Number(right?.startLine))
+      .map((assignment) => ({
+        assignment
+      }))
+  };
+}
+
+function resolveVariableAssignmentSelection(parsed, runtimeLookups, ownerId, normalizedVariable, line) {
+  if (!ownerId || !normalizedVariable) {
+    return undefined;
+  }
+  return resolveVariableAssignmentSelectionFromAssignments(
+    buildVariableDefinitionEntries(parsed, runtimeLookups, ownerId, normalizedVariable),
+    line,
+    getBranchPathForLine(parsed, line)
+  );
+}
+
 function findLatestVariableAssignmentForOwner(parsed, ownerId, normalizedVariable, line) {
   if (!parsed || !ownerId || !normalizedVariable) {
     return undefined;
   }
-  let selectedAssignment = undefined;
-  for (const assignment of parsed.variableAssignments || []) {
-    if (assignment.ownerId !== ownerId) {
-      continue;
-    }
-    if (assignment.normalizedVariable !== normalizedVariable) {
-      continue;
-    }
-    if (assignment.startLine > line) {
-      continue;
-    }
-    if (!selectedAssignment || assignment.startLine > selectedAssignment.startLine) {
-      selectedAssignment = assignment;
-    }
-  }
-  return selectedAssignment;
+  const resolved = resolveVariableAssignmentSelectionFromAssignments(
+    getVariableAssignmentsForOwner(parsed, undefined, ownerId, normalizedVariable),
+    line,
+    getBranchPathForLine(parsed, line)
+  );
+  return resolved?.kind === "single" ? resolved.assignment : undefined;
 }
 
-function findLatestVariableAssignmentForOwnerFromLookups(runtimeLookups, ownerId, normalizedVariable, line) {
-  if (!runtimeLookups || !ownerId || !normalizedVariable) {
+function findLatestVariableAssignmentForOwnerFromLookups(parsed, runtimeLookups, ownerId, normalizedVariable, line) {
+  if (!parsed || !runtimeLookups || !ownerId || !normalizedVariable) {
     return undefined;
   }
-  const ownerMap = runtimeLookups.variableAssignmentsByOwnerAndVariable?.get(ownerId);
-  const assignments = ownerMap?.get(normalizedVariable) || [];
-  return findLatestAssignmentBeforeLine(assignments, line);
+  const resolved = resolveVariableAssignmentSelectionFromAssignments(
+    getVariableAssignmentsForOwner(parsed, runtimeLookups, ownerId, normalizedVariable),
+    line,
+    getBranchPathForLine(parsed, line)
+  );
+  return resolved?.kind === "single" ? resolved.assignment : undefined;
 }
 
 function findLatestKeywordCallAssignmentForOwner(parsed, ownerId, normalizedVariable, line) {
@@ -10442,6 +11027,8 @@ async function createEnumValueHover(
     enabledCommands: [CMD_OPEN_LOCATION]
   };
   markdown.supportHtml = false;
+  const currentValueKind = String(context.currentValueKind || "single").trim().toLowerCase();
+  const currentValueCandidates = Array.isArray(context.currentValueCandidates) ? context.currentValueCandidates : [];
   const resolvedCurrentValue = String(context.currentValue || context.argumentValue || "");
   const normalizedCurrentValue = resolvedCurrentValue.toLowerCase();
   const resolvedCurrentValueDisplay = resolvedCurrentValue.length > 0 ? resolvedCurrentValue : "(empty)";
@@ -10475,20 +11062,49 @@ async function createEnumValueHover(
     }
   }
   markdown.appendMarkdown(shownEnums.length > 0 ? "### Robot Enum Hint\n\n" : "### Robot Argument Hint\n\n");
-  markdown.appendMarkdown("**Current value (resolved):**  \n");
-  markdown.appendMarkdown(`🟢 \`${escapeMarkdownInline(topResolvedCurrentValueDisplay)}\`\n\n`);
+  if (currentValueKind === "conditional" && currentValueCandidates.length > 0) {
+    markdown.appendMarkdown("**Current value (conditional):**\n");
+    for (const candidate of currentValueCandidates) {
+      const sourceLineNumber =
+        Number.isFinite(Number(candidate?.sourceLine)) && Number(candidate.sourceLine) >= 0
+          ? Number(candidate.sourceLine) + 1
+          : undefined;
+      const displayValue = String(candidate?.value || "").trim() || "(empty)";
+      markdown.appendMarkdown(`- \`${escapeMarkdownInline(displayValue)}\``);
+      if (sourceLineNumber) {
+        markdown.appendMarkdown(
+          ` from \`${escapeMarkdownInline(getLocalVariableAssignmentSourceLabel(candidate))}\` line ${sourceLineNumber}`
+        );
+        const sourceCommand = buildOpenLocationCommandUri(document.uri.toString(), Number(candidate.sourceLine));
+        if (sourceCommand) {
+          markdown.appendMarkdown(
+            `  \n  [Jump to ${escapeMarkdownInline(getLocalVariableAssignmentSourceLabel(candidate))} line ${sourceLineNumber}](${sourceCommand})`
+          );
+        }
+      }
+      markdown.appendMarkdown("\n");
+    }
+    markdown.appendMarkdown("\n");
+  } else {
+    markdown.appendMarkdown("**Current value (resolved):**  \n");
+    markdown.appendMarkdown(`🟢 \`${escapeMarkdownInline(topResolvedCurrentValueDisplay)}\`\n\n`);
+  }
   markdown.appendMarkdown("**Keyword:** ");
   markdown.appendText(context.keywordName);
   markdown.appendMarkdown("  \n");
   markdown.appendMarkdown("**Argument:** ");
   markdown.appendText(context.argumentName);
   markdown.appendMarkdown("  \n");
-  if (String(context.currentValue || "").trim() !== String(context.argumentValue || "").trim()) {
+  if (
+    currentValueKind !== "conditional" &&
+    String(context.currentValue || "").trim() !== String(context.argumentValue || "").trim()
+  ) {
     markdown.appendMarkdown("**Argument value:** ");
     markdown.appendText(context.argumentValue);
     markdown.appendMarkdown("  \n");
   }
   if (
+    currentValueKind !== "conditional" &&
     isLocalVariableCurrentValueSource(context.currentValueSource) &&
     Number.isFinite(Number(context.currentValueSourceLine)) &&
     Number(context.currentValueSourceLine) >= 0
@@ -10685,12 +11301,15 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
           ? Number(options.hoverCharacter)
           : Math.max(0, Number(context.hoverStart) || 0)
       )
-    : {
+      : {
+        kind: "fallback",
         value: String(context.argumentValue || "").trim(),
         source: "argument",
-        sourceLine: undefined
+        sourceLine: undefined,
+        sourceLabel: "",
+        candidates: []
       };
-  const currentValue = currentValueResolution.value;
+  const currentValue = currentValueResolution.kind === "single" ? currentValueResolution.value : "";
   const returnHintContext =
     shouldResolveCurrentValue && parsed
       ? await resolveReturnHintForArgumentValue(
@@ -10811,6 +11430,10 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
     normalizedKeyword,
     normalizedArgument,
     currentValue,
+    currentValueKind: currentValueResolution.kind || "single",
+    currentValueCandidates: Array.isArray(currentValueResolution.candidates)
+      ? currentValueResolution.candidates
+      : [],
     currentValueSource: currentValueResolution.source,
     currentValueSourceLabel: currentValueResolution.sourceLabel || "",
     currentValueSourceLine: currentValueResolution.sourceLine,
@@ -13276,70 +13899,12 @@ function escapeMarkdownText(value) {
     .replace(/([*_#[\]()<>|])/g, "\\$1");
 }
 
-function buildDocumentationVariableRenderItems(documentUri, block) {
-  const assignments = [...(Array.isArray(block?.variableAssignments) ? block.variableAssignments : [])].sort(
-    (left, right) => Number(left?.startLine) - Number(right?.startLine)
-  );
-  if (assignments.length === 0) {
-    return [];
-  }
-
-  const items = [
-    createDocumentationRenderItem("blank", [""]),
-    createDocumentationRenderItem("heading", ["## Variables"], {
-      commandUri: buildOpenLocationCommandUri(documentUri, assignments[0].startLine),
-      label: `Open variable definitions starting at line ${assignments[0].startLine + 1}`
-    }),
-    createDocumentationRenderItem("blank", [""])
-  ];
-
-  for (const assignment of assignments) {
-    const variableToken = String(assignment?.variableToken || "").trim();
-    if (!variableToken) {
-      continue;
-    }
-
-    const sourceLine = Math.max(0, Number(assignment?.startLine) || 0);
-    const valuePreview = formatDocumentationVariableValuePreview(assignment?.valueRaw);
-    items.push(
-      createDocumentationRenderItem(
-        "list-item",
-        [`- \`${escapeMarkdownInline(variableToken)}\`: ${escapeMarkdownText(valuePreview)}`],
-        {
-          commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
-          label: `Open ${getLocalVariableAssignmentSourceLabel(assignment)} line ${sourceLine + 1}`
-        }
-      )
-    );
-  }
-
-  return items;
-}
-
-function buildDocumentationRenderData(documentUri, block) {
-  const fragments =
-    Array.isArray(block?.fragments) && block.fragments.length > 0
-      ? block.fragments
-      : [
-          {
-            sourceKind: "documentation",
-            startLine: Number(block?.startLine) || 0,
-            markdown: String(block?.markdown || "")
-          }
-        ];
-
+function buildDocumentationMarkdownSectionRenderData(rawItems) {
   const markdownLines = [];
-  const rawItems = [];
   const targets = [];
-
-  for (const fragment of fragments) {
-    const items = buildDocumentationRenderItemsForFragment(documentUri, fragment);
-    rawItems.push(...items);
-  }
-  rawItems.push(...buildDocumentationVariableRenderItems(documentUri, block));
-
   const mergedItems = [];
-  for (const item of rawItems) {
+
+  for (const item of Array.isArray(rawItems) ? rawItems : []) {
     if (item.kind === "blank") {
       const previous = mergedItems[mergedItems.length - 1];
       if (!previous || previous.kind !== "blank") {
@@ -13384,11 +13949,367 @@ function buildDocumentationRenderData(documentUri, block) {
   };
 }
 
+function buildDocumentationBodyRenderData(documentUri, block) {
+  const fragments =
+    Array.isArray(block?.fragments) && block.fragments.length > 0
+      ? block.fragments
+      : [
+          {
+            sourceKind: "documentation",
+            startLine: Number(block?.startLine) || 0,
+            markdown: String(block?.markdown || "")
+          }
+        ];
+
+  const rawItems = [];
+
+  for (const fragment of fragments) {
+    const items = buildDocumentationRenderItemsForFragment(documentUri, fragment);
+    rawItems.push(...items);
+  }
+  return buildDocumentationMarkdownSectionRenderData(rawItems);
+}
+
+function chooseDocumentationVariableDisplayToken(assignments) {
+  const sortedAssignments = [...(Array.isArray(assignments) ? assignments : [])].sort(
+    (left, right) => Number(left?.startLine) - Number(right?.startLine)
+  );
+  const typedAssignment = sortedAssignments.find((assignment) =>
+    /[@$&%]\{[^}\r\n]*:\s*[^}\r\n]+\}/.test(String(assignment?.variableToken || "").trim())
+  );
+  return String(typedAssignment?.variableToken || sortedAssignments[0]?.variableToken || "").trim();
+}
+
+function buildDocumentationVariableCurrentValuePreview(assignment) {
+  if (!assignment) {
+    return "(empty)";
+  }
+  if (String(assignment?.assignmentKind || "") === "keyword-return") {
+    return `Return from ${String(assignment?.keywordName || "").trim() || "keyword"}`;
+  }
+  return formatDocumentationVariableValuePreview(
+    extractCurrentValueFromSetVariableAssignment(assignment.valueRaw || "")
+  );
+}
+
+function buildDocumentationVariableValueVariants(assignments) {
+  const variants = [];
+  const seenValues = new Set();
+  for (const assignment of [...(Array.isArray(assignments) ? assignments : [])].sort(
+    (left, right) => Number(left?.startLine) - Number(right?.startLine)
+  )) {
+    const displayValue = buildDocumentationVariableCurrentValuePreview(assignment);
+    const key = normalizeComparableToken(displayValue);
+    if (!key || seenValues.has(key)) {
+      continue;
+    }
+    seenValues.add(key);
+    variants.push({
+      value: displayValue,
+      assignment
+    });
+  }
+  return variants;
+}
+
+function summarizeDocumentationConditionalCandidates(selection) {
+  const candidates = [];
+  const seenValues = new Set();
+
+  for (const candidate of buildLocalVariableConditionalCandidates(selection)) {
+    const displayValue = formatDocumentationVariableValuePreview(candidate?.value || "");
+    const key = normalizeComparableToken(displayValue);
+    if (seenValues.has(key)) {
+      continue;
+    }
+    seenValues.add(key);
+    candidates.push(displayValue);
+  }
+
+  return candidates;
+}
+
+function buildVariableDefinitionEntriesFromSources(variableAssignments, keywordReturnAssignments, normalizedVariable) {
+  const safeNormalizedVariable = String(normalizedVariable || "").trim();
+  if (!safeNormalizedVariable) {
+    return [];
+  }
+
+  const localAssignmentKeys = new Set();
+  const entries = [];
+  for (const assignment of Array.isArray(variableAssignments) ? variableAssignments : []) {
+    if (String(assignment?.normalizedVariable || "").trim() !== safeNormalizedVariable) {
+      continue;
+    }
+    const startLine = Math.max(0, Number(assignment?.startLine) || 0);
+    localAssignmentKeys.add(`${startLine}:${safeNormalizedVariable}`);
+    entries.push({
+      ...assignment,
+      assignmentKind: "local"
+    });
+  }
+
+  for (const assignment of Array.isArray(keywordReturnAssignments) ? keywordReturnAssignments : []) {
+    const normalizedReturnVariables = Array.isArray(assignment?.normalizedReturnVariables)
+      ? assignment.normalizedReturnVariables
+      : [];
+    if (!normalizedReturnVariables.includes(safeNormalizedVariable)) {
+      continue;
+    }
+    const startLine = Math.max(0, Number(assignment?.startLine) || 0);
+    if (localAssignmentKeys.has(`${startLine}:${safeNormalizedVariable}`)) {
+      continue;
+    }
+    entries.push({
+      id: `keyword:${assignment.id}:${safeNormalizedVariable}`,
+      assignmentKind: "keyword-return",
+      keywordAssignment: assignment,
+      keywordName: assignment.keywordName,
+      startLine: assignment.startLine,
+      endLine: assignment.endLine,
+      branchPath: cloneBranchPath(assignment.branchPath),
+      branchGroupId: String(assignment.branchGroupId || ""),
+      branchId: String(assignment.branchId || ""),
+      ownerId: assignment.ownerId,
+      ownerName: assignment.ownerName,
+      section: assignment.section
+    });
+  }
+
+  return entries;
+}
+
+function buildDocumentationLocalVariableSummaryEntries(documentUri, block) {
+  const assignments = [...(Array.isArray(block?.variableAssignments) ? block.variableAssignments : [])].sort(
+    (left, right) => Number(left?.startLine) - Number(right?.startLine)
+  );
+  if (assignments.length === 0) {
+    return [];
+  }
+
+  const assignmentsByVariable = new Map();
+  for (const assignment of assignments) {
+    const normalizedVariable = String(assignment?.normalizedVariable || "").trim();
+    if (!normalizedVariable) {
+      continue;
+    }
+    const items = assignmentsByVariable.get(normalizedVariable) || [];
+    items.push(assignment);
+    assignmentsByVariable.set(normalizedVariable, items);
+  }
+
+  const referenceLine = Math.max(0, Number(block?.ownerEndLine) || Number(block?.endLine) || 0);
+  const summaryEntries = [];
+
+  for (const [normalizedVariable, items] of assignmentsByVariable.entries()) {
+    const mixedEntries = buildVariableDefinitionEntriesFromSources(
+      block?.variableAssignments,
+      block?.keywordCallAssignments,
+      normalizedVariable
+    );
+    const summarySelection = resolveVariableAssignmentSelectionFromAssignments(mixedEntries, referenceLine, []);
+    const firstAssignment = items[0];
+    const displayToken = chooseDocumentationVariableDisplayToken(items) || String(firstAssignment?.variableToken || "").trim();
+    const valueVariants = buildDocumentationVariableValueVariants(mixedEntries);
+    const hasMultipleValueVariants = valueVariants.length > 1;
+    const primaryAssignment =
+      summarySelection?.kind === "single"
+        ? summarySelection.assignment
+        : summarySelection?.candidates?.[0]?.assignment || firstAssignment;
+    const latestAssignment = [...mixedEntries].sort((left, right) => Number(left?.startLine) - Number(right?.startLine)).at(-1);
+    const sourceAssignment = hasMultipleValueVariants ? firstAssignment : latestAssignment || primaryAssignment || firstAssignment;
+    const sourceLine = Math.max(0, Number(sourceAssignment?.startLine) || Number(firstAssignment?.startLine) || 0);
+    const commandUri = buildOpenLocationCommandUri(documentUri, sourceLine);
+
+    if (hasMultipleValueVariants || summarySelection?.kind === "conditional") {
+      const candidateValues =
+        hasMultipleValueVariants && valueVariants.length > 0
+          ? valueVariants.map((candidate) => candidate.value)
+          : summarizeDocumentationConditionalCandidates(summarySelection);
+      summaryEntries.push({
+        normalizedVariable,
+        variableToken: displayToken,
+        startLine: Math.max(0, Number(firstAssignment?.startLine) || 0),
+        sourceLine,
+        commandUri,
+        label: `Open variable definitions for ${displayToken} starting at line ${sourceLine + 1}`,
+        valuePreview: candidateValues.join(" | ") || "(empty)",
+        hintText: "Ambiguous",
+        isConditional: true
+      });
+      continue;
+    }
+
+    summaryEntries.push({
+      normalizedVariable,
+      variableToken: displayToken,
+      startLine: Math.max(0, Number(firstAssignment?.startLine) || 0),
+      sourceLine,
+      commandUri,
+      label: `Open ${getLocalVariableAssignmentSourceLabel(primaryAssignment)} line ${sourceLine + 1}`,
+      valuePreview: buildDocumentationVariableCurrentValuePreview(primaryAssignment),
+      hintText: "",
+      isConditional: false
+    });
+  }
+
+  return summaryEntries.sort((left, right) => left.startLine - right.startLine);
+}
+
+function buildDocumentationReturnedVariableEntries(documentUri, block) {
+  const assignments = [...(Array.isArray(block?.keywordCallAssignments) ? block.keywordCallAssignments : [])].sort(
+    (left, right) => Number(left?.startLine) - Number(right?.startLine)
+  );
+  const localAssignmentKeys = new Set(
+    [...(Array.isArray(block?.variableAssignments) ? block.variableAssignments : [])]
+      .map((assignment) => {
+        const startLine = Math.max(0, Number(assignment?.startLine) || 0);
+        const normalizedVariable = String(assignment?.normalizedVariable || "").trim();
+        if (!normalizedVariable) {
+          return "";
+        }
+        return `${startLine}:${normalizedVariable}`;
+      })
+      .filter(Boolean)
+  );
+  const entries = [];
+
+  for (const assignment of assignments) {
+    const returnVariables = Array.isArray(assignment?.returnVariables) ? assignment.returnVariables : [];
+    for (const variableToken of returnVariables) {
+      const trimmedVariableToken = String(variableToken || "").trim();
+      if (!trimmedVariableToken) {
+        continue;
+      }
+      const sourceLine = Math.max(0, Number(assignment?.startLine) || 0);
+      const normalizedVariable = normalizeVariableLookupToken(trimmedVariableToken);
+      if (normalizedVariable && localAssignmentKeys.has(`${sourceLine}:${normalizedVariable}`)) {
+        continue;
+      }
+      entries.push({
+        variableToken: trimmedVariableToken,
+        sourceLine,
+        commandUri: buildOpenLocationCommandUri(documentUri, sourceLine),
+        label: `Open keyword return line ${sourceLine + 1}`,
+        valuePreview: `Return from ${String(assignment?.keywordName || "").trim() || "keyword"}`
+      });
+    }
+  }
+
+  return entries;
+}
+
+function renderDocumentationReturnedVariablesToggleHtml(toggleKey, options = {}) {
+  const safeToggleKey = String(toggleKey || "").trim();
+  if (!safeToggleKey) {
+    return "";
+  }
+
+  const showLabel = String(options.showLabel || "Show Returned Variables").trim() || "Show Returned Variables";
+  const hideLabel = String(options.hideLabel || "Hide Returned Variables").trim() || "Hide Returned Variables";
+
+  return `<div class="doc-variable-toggle-row">
+            <button
+              type="button"
+              class="preview-action-button doc-variable-toggle-button"
+              data-preview-toggle-target="${escapeHtmlAttribute(safeToggleKey)}"
+              data-preview-toggle-show-label="${escapeHtmlAttribute(showLabel)}"
+              data-preview-toggle-hide-label="${escapeHtmlAttribute(hideLabel)}"
+              aria-expanded="false"
+            >${escapeHtml(showLabel)}</button>
+          </div>`;
+}
+
+function renderDocumentationVariableSectionHtml(title, entries, options = {}) {
+  const safeEntries = Array.isArray(entries) ? entries : [];
+  if (safeEntries.length === 0) {
+    return "";
+  }
+
+  const sectionClassName = String(options.sectionClassName || "").trim();
+  const sectionAttributes = [];
+  const toggleKey = String(options.toggleKey || "").trim();
+  if (toggleKey) {
+    sectionAttributes.push(`data-preview-toggle-section="${escapeHtmlAttribute(toggleKey)}"`);
+    sectionAttributes.push("hidden");
+  }
+
+  const firstSourceLine = Math.max(0, Number(safeEntries[0]?.sourceLine) || 0);
+  const headingCommandUri = buildOpenLocationCommandUri(String(options.documentUri || ""), firstSourceLine);
+  const headingHtml = headingCommandUri
+    ? `<a href="${escapeHtmlAttribute(headingCommandUri)}">${escapeHtml(title)}</a>`
+    : escapeHtml(title);
+
+  const rowsHtml = safeEntries
+    .map((entry) => {
+      const commandUri = String(entry?.commandUri || "").trim();
+      const rowAttributes = [];
+      if (commandUri) {
+        rowAttributes.push(`data-source-command="${escapeHtmlAttribute(commandUri)}"`);
+        rowAttributes.push('tabindex="0"');
+        rowAttributes.push('role="link"');
+      }
+
+      const label = String(entry?.label || "").trim();
+      if (label) {
+        rowAttributes.push(`title="${escapeHtmlAttribute(label)}"`);
+      }
+
+      const hintHtml = String(entry?.hintText || "").trim()
+        ? `<span class="doc-variable-hint">${escapeHtml(String(entry.hintText))}</span>`
+        : "";
+
+      return `<li class="doc-variable-row${commandUri ? " doc-clickable" : ""}" ${rowAttributes.join(" ")}>
+                <code class="doc-variable-name">${escapeHtml(String(entry?.variableToken || ""))}</code>: <span class="doc-variable-value">${hintHtml}${escapeHtml(String(entry?.valuePreview || "(empty)"))}</span>
+              </li>`;
+    })
+    .join("\n");
+
+  const footerHtml = String(options.footerHtml || "").trim();
+  return `<section class="doc-variable-section ${escapeHtmlAttribute(sectionClassName)}" ${sectionAttributes.join(" ")}>
+            <h2 class="doc-variable-section-title">${headingHtml}</h2>
+            <ul class="doc-variable-list">
+              ${rowsHtml}
+            </ul>
+            ${footerHtml}
+          </section>`;
+}
+
 async function renderDocumentationBlockHtml(documentUri, block) {
-  const renderData = buildDocumentationRenderData(documentUri, block);
-  const renderedHtml = await renderMarkdownToHtml(formatMarkdownForDisplay(renderData.markdown));
-  const encodedTargets = escapeHtmlAttribute(encodeURIComponent(JSON.stringify(renderData.targets || [])));
-  return `<section class="doc-render-flow" data-doc-render-targets="${encodedTargets}">${renderedHtml}</section>`;
+  const bodyRenderData = buildDocumentationBodyRenderData(documentUri, block);
+  const bodyHtml = bodyRenderData.markdown
+    ? await renderMarkdownToHtml(formatMarkdownForDisplay(bodyRenderData.markdown))
+    : "";
+  const encodedTargets = escapeHtmlAttribute(encodeURIComponent(JSON.stringify(bodyRenderData.targets || [])));
+  const localVariableSectionHtml = renderDocumentationVariableSectionHtml(
+    "Variables",
+    buildDocumentationLocalVariableSummaryEntries(documentUri, block),
+    {
+      documentUri,
+      sectionClassName: "doc-variable-section-primary",
+      footerHtml:
+        Array.isArray(block?.keywordCallAssignments) && block.keywordCallAssignments.length > 0
+          ? renderDocumentationReturnedVariablesToggleHtml("returned-variables")
+          : ""
+    }
+  );
+  const returnedVariableSectionHtml = renderDocumentationVariableSectionHtml(
+    "Returned Variables",
+    buildDocumentationReturnedVariableEntries(documentUri, block),
+    {
+      documentUri,
+      sectionClassName: "doc-variable-section-secondary",
+      toggleKey: "returned-variables"
+    }
+  );
+
+  return [
+    `<section class="doc-render-flow" data-doc-render-targets="${encodedTargets}">${bodyHtml}</section>`,
+    localVariableSectionHtml,
+    returnedVariableSectionHtml
+  ]
+    .filter((section) => String(section || "").trim().length > 0)
+    .join("");
 }
 
 function styleEnumDetailsForPanel(renderedHtml) {
