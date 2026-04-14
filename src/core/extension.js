@@ -7604,16 +7604,60 @@ function getKeywordReturnVariableContextAtPosition(document, parsed, position, r
   };
 }
 
-function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, line, runtimeLookups) {
-  const rawValue = String(argumentValue || "").trim();
+function getHoveredVariableTokenFromArgumentValueContext(argumentContext, positionOrCharacter) {
+  const rawValue = String(argumentContext?.argumentValue || "").trim();
+  if (!rawValue || !/^[@$&%]\{/.test(rawValue)) {
+    return undefined;
+  }
+
+  const valueStart = Math.max(0, Number(argumentContext?.valueStart) || 0);
+  const rawCharacter =
+    typeof positionOrCharacter === "number"
+      ? positionOrCharacter
+      : Number(positionOrCharacter?.character);
+  let relativeCharacter = undefined;
+  if (Number.isFinite(rawCharacter) && rawCharacter >= valueStart) {
+    relativeCharacter = Math.max(0, Math.min(Math.max(0, rawValue.length - 1), rawCharacter - valueStart));
+  } else if (/^[@$&%]\{[^}\r\n]+\}$/.test(rawValue)) {
+    relativeCharacter = 0;
+  }
+
+  if (!Number.isFinite(relativeCharacter)) {
+    return undefined;
+  }
+
+  const variableToken = getVariableTokenAtPosition(rawValue, Number(relativeCharacter));
+  if (!variableToken) {
+    return undefined;
+  }
+
+  return {
+    token: variableToken.token,
+    start: valueStart + variableToken.start,
+    end: valueStart + variableToken.end
+  };
+}
+
+function resolveNamedArgumentCurrentValueFromSetVariable(argumentContext, parsed, line, runtimeLookups, hoverCharacter) {
+  const normalizedContext =
+    argumentContext && typeof argumentContext === "object"
+      ? argumentContext
+      : {
+          argumentValue: argumentContext,
+          valueStart: 0
+        };
+  const rawValue = String(normalizedContext?.argumentValue || "").trim();
+  const hoveredVariableToken = getHoveredVariableTokenFromArgumentValueContext(normalizedContext, hoverCharacter);
+  const lookupToken =
+    hoveredVariableToken?.token || (/^[@$&%]\{[^}\r\n]+\}$/.test(rawValue) ? rawValue : "");
   const fallback = {
-    value: rawValue,
+    value: hoveredVariableToken?.token || rawValue,
     source: "argument",
     sourceLine: undefined,
     sourceLabel: ""
   };
 
-  if (!rawValue || !/^[@$&%]\{[^}\r\n]+\}$/.test(rawValue)) {
+  if (!lookupToken) {
     return fallback;
   }
 
@@ -7626,7 +7670,7 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentValue, parsed, 
     return fallback;
   }
 
-  const normalizedVariable = normalizeVariableLookupToken(rawValue);
+  const normalizedVariable = normalizeVariableLookupToken(lookupToken);
   const selectedAssignment = runtimeLookups
     ? findLatestVariableAssignmentForOwnerFromLookups(runtimeLookups, owner.id, normalizedVariable, line)
     : findLatestVariableAssignmentForOwner(parsed, owner.id, normalizedVariable, line);
@@ -7678,7 +7722,13 @@ async function resolveReturnHintForArgumentValue(
   }
 
   const rawArgumentValue = String(context.argumentValue || "").trim();
-  if (!rawArgumentValue || !/^[@$&%]\{[^}\r\n]+\}$/.test(rawArgumentValue)) {
+  if (!rawArgumentValue || !/^[@$&%]\{/.test(rawArgumentValue)) {
+    return undefined;
+  }
+  const hoveredVariableReference = getHoveredVariableTokenFromArgumentValueContext(context, position);
+  const rawVariableToken =
+    hoveredVariableReference?.token || (/^[@$&%]\{[^}\r\n]+\}$/.test(rawArgumentValue) ? rawArgumentValue : "");
+  if (!rawVariableToken) {
     return undefined;
   }
 
@@ -7691,7 +7741,7 @@ async function resolveReturnHintForArgumentValue(
     return undefined;
   }
 
-  const normalizedVariable = normalizeVariableLookupToken(rawArgumentValue);
+  const normalizedVariable = normalizeVariableLookupToken(rawVariableToken);
   const runtimeState = runtimeCacheService?.ensureState(document, parsed);
   const runtimeLookups = runtimeState?.lookups;
   const selectedAssignment = runtimeLookups
@@ -7719,14 +7769,15 @@ async function resolveReturnHintForArgumentValue(
       () =>
         resolveReturnHintForArgumentValueFromAssignment(
           document,
-          rawArgumentValue,
+          rawVariableToken,
           context,
           position,
           owner,
           selectedAssignment,
           enumHintService,
           returnComputeWorker,
-          cancellationToken
+          cancellationToken,
+          hoveredVariableReference
         ),
       { referenceLine: position.line }
     );
@@ -7738,14 +7789,15 @@ async function resolveReturnHintForArgumentValue(
 
   const resolved = await resolveReturnHintForArgumentValueFromAssignment(
     document,
-    rawArgumentValue,
+    rawVariableToken,
     context,
     position,
     owner,
     selectedAssignment,
     enumHintService,
     returnComputeWorker,
-    cancellationToken
+    cancellationToken,
+    hoveredVariableReference
   );
   if (isHoverCancellationRequested(cancellationToken)) {
     return undefined;
@@ -7762,7 +7814,8 @@ async function resolveReturnHintForArgumentValueFromAssignment(
   selectedAssignment,
   enumHintService,
   returnComputeWorker,
-  cancellationToken
+  cancellationToken,
+  hoveredVariableReference
 ) {
   if (isHoverCancellationRequested(cancellationToken)) {
     return undefined;
@@ -7873,8 +7926,12 @@ async function resolveReturnHintForArgumentValueFromAssignment(
     sourceLine: selectedAssignment.startLine,
     variableToken: {
       token: rawArgumentValue,
-      start: context.hoverStart,
-      end: context.hoverEnd
+      start: Number.isFinite(Number(hoveredVariableReference?.start))
+        ? Number(hoveredVariableReference.start)
+        : context.hoverStart,
+      end: Number.isFinite(Number(hoveredVariableReference?.end))
+        ? Number(hoveredVariableReference.end)
+        : context.hoverEnd
     },
     normalizedKeyword,
     returnAnnotation,
@@ -9916,11 +9973,17 @@ function buildReturnHintContextCacheKey(ownerId, normalizedVariable, assignmentI
 function buildEnumPreviewContextCacheKey(context, referenceLine, options = {}) {
   const maxEnums = Math.max(1, Number(options.maxEnums) || getEnumHoverMaxEnums());
   const maxMembers = Math.max(1, Number(options.maxMembers) || getEnumHoverMaxMembers());
+  const hoveredVariableToken =
+    getHoveredVariableTokenFromArgumentValueContext(
+      context,
+      Number.isFinite(Number(options.hoverCharacter)) ? Number(options.hoverCharacter) : undefined
+    )?.token || "";
   return [
     "enum",
     normalizeKeywordName(context.keywordName),
     normalizeArgumentName(context.argumentName),
     String(context.argumentValue || ""),
+    hoveredVariableToken,
     Math.max(0, Number(referenceLine) || 0),
     options.showArgumentAssignment === false ? "0" : "1",
     options.showResolvedCurrentValue === false ? "0" : "1",
@@ -10517,7 +10580,8 @@ async function resolveEnumValuePreview(document, position, enumHintService, opti
 
   return resolveEnumValuePreviewFromContext(document, enumHintService, context, {
     ...options,
-    referenceLine: position.line
+    referenceLine: position.line,
+    hoverCharacter: position.character
   });
 }
 
@@ -10566,10 +10630,13 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
   const shouldResolveCurrentValue = options.showResolvedCurrentValue !== false;
   const currentValueResolution = shouldResolveCurrentValue
     ? resolveNamedArgumentCurrentValueFromSetVariable(
-        context.argumentValue,
+        context,
         parsed,
         referenceLine,
-        runtimeState?.lookups
+        runtimeState?.lookups,
+        Number.isFinite(Number(options.hoverCharacter))
+          ? Number(options.hoverCharacter)
+          : Math.max(0, Number(context.hoverStart) || 0)
       )
     : {
         value: String(context.argumentValue || "").trim(),
@@ -10585,7 +10652,9 @@ async function resolveEnumValuePreviewFromContext(document, enumHintService, con
           context,
           {
             line: referenceLine,
-            character: Math.max(0, Number(context.hoverStart) || 0)
+            character: Number.isFinite(Number(options.hoverCharacter))
+              ? Number(options.hoverCharacter)
+              : Math.max(0, Number(context.hoverStart) || 0)
           },
           enumHintService,
           runtimeCacheService,

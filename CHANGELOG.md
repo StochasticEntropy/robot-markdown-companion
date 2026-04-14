@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.67
+
+- Fixed local variable hover resolution inside concatenated named-argument values such as `${Prefix}${Result.id}`.
+- Hover and return-hint resolution now target the exact variable under the cursor instead of requiring the whole argument value to be a single variable token.
+- Added regression coverage for concatenated local `VAR` and typed-variable hover resolution.
+
 ## 0.4.66
 
 - Added hover support for Robot Framework 7 local `VAR` assignments such as `VAR    ${name}    value`.

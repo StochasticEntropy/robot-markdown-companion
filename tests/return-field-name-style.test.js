@@ -960,7 +960,10 @@ Case Var Assignment
   assert.match(typedSetVariableHover.contents[0].value, /\*\*Source:\*\* `Set Variable` at line 5/);
 
   const namedArgumentCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
-    "${typedDate}",
+    {
+      argumentValue: "${typedDate}",
+      valueStart: 0
+    },
     parsed,
     6
   );
@@ -968,6 +971,21 @@ Case Var Assignment
   assert.strictEqual(namedArgumentCurrentValue.source, "local-variable");
   assert.strictEqual(namedArgumentCurrentValue.sourceLabel, "VAR");
   assert.strictEqual(namedArgumentCurrentValue.sourceLine, 3);
+
+  const combinedArgumentCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${plainDate}${typedDate}",
+      valueStart: 20
+    },
+    parsed,
+    6,
+    undefined,
+    20 + "${plainDate}".length + 3
+  );
+  assert.strictEqual(combinedArgumentCurrentValue.value, "2022-01-02");
+  assert.strictEqual(combinedArgumentCurrentValue.source, "local-variable");
+  assert.strictEqual(combinedArgumentCurrentValue.sourceLabel, "VAR");
+  assert.strictEqual(combinedArgumentCurrentValue.sourceLine, 3);
 }
 
 function runDocumentationFoldingTests() {
