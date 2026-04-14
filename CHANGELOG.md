@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.87
+
+- Switched documentation preview source jumps from the older hidden-anchor trigger to the same managed webview message bridge used by the keyword-doc panel.
+- This targets hosts where documentation lines rendered correctly but clicking them did not trigger the jump command.
+- Added a focused regression for the managed documentation-preview click bridge and kept the full VS Code UI suite green.
+
 ## 0.4.86
 
 - Fixed leaked `[[RDP_INDENT_*]]` placeholders in the documentation preview by expanding arrow indentation into real rendered HTML before the preview is shown.

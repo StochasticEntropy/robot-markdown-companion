@@ -864,6 +864,44 @@ function runRenderedArrowIndentHtmlTransformTests() {
   assert(transformedHtml.includes("-&gt; fallback proof"));
 }
 
+function runDocumentationPreviewManagedClickBridgeTests() {
+  const renderedHtml = extensionTestApi.buildDocumentationPreviewWebviewHtmlForTest(
+    {
+      documentUri: "file:///tmp/test.robot",
+      fileName: "test.robot",
+      blocks: [
+        {
+          id: "block-1",
+          ownerName: "Case One",
+          title: "Flow",
+          startLine: 10,
+          endLine: 20,
+          ownerStartLine: 2
+        }
+      ]
+    },
+    {
+      id: "block-1",
+      ownerName: "Case One",
+      title: "Flow",
+      startLine: 10,
+      endLine: 20,
+      ownerStartLine: 2
+    },
+    '<section class="doc-render-flow" data-doc-render-targets="%5B%7B%22commandUri%22%3A%22command%3ArobotCompanion.openLocation%253Fexample%22%2C%22label%22%3A%22Open%22%2C%22kind%22%3A%22heading%22%7D%5D"><h2>Flow</h2></section>'
+  );
+
+  assert(renderedHtml.includes("acquireVsCodeApi"), "expected preview webview to request the VS Code API");
+  assert(
+    renderedHtml.includes("type: 'executeCommandUri'"),
+    "expected preview webview to post executeCommandUri messages for managed clicks"
+  );
+  assert(
+    renderedHtml.includes("vscodeApi.postMessage"),
+    "expected preview webview to send managed click commands through the VS Code message bridge"
+  );
+}
+
 function decodeDocumentationRenderTargets(renderedHtml) {
   const targetMatch = String(renderedHtml || "").match(/data-doc-render-targets="([^"]+)"/);
   assert(targetMatch, "expected rendered documentation HTML to include encoded source targets");
@@ -2114,6 +2152,7 @@ async function main() {
   await runInlineDocumentationTests();
   await runIndentedInlineDocumentationTests();
   runRenderedArrowIndentHtmlTransformTests();
+  runDocumentationPreviewManagedClickBridgeTests();
   await runLargeFixtureRenderTargetTests();
   await runDocumentationVariableSectionRenderTests();
   runConditionalVariableResolutionTests();

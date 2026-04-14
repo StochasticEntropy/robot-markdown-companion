@@ -3794,18 +3794,39 @@ class RobotDocPreviewViewProvider {
     this._view = undefined;
     this._renderSequence = 0;
     this._state = createEmptyPreviewState();
+    this._messageDisposable = undefined;
   }
 
   dispose() {
+    this._messageDisposable?.dispose?.();
+    this._messageDisposable = undefined;
     this._view = undefined;
   }
 
   resolveWebviewView(webviewView) {
+    this._messageDisposable?.dispose?.();
     this._view = webviewView;
     this._view.webview.options = {
       enableCommandUris: true,
       enableScripts: true
     };
+    this._messageDisposable = this._view.webview.onDidReceiveMessage(async (message) => {
+      if (!message || typeof message !== "object") {
+        return;
+      }
+
+      if (message.type !== "executeCommandUri") {
+        return;
+      }
+
+      try {
+        await executeManagedCommandUri(message.commandUri);
+      } catch (error) {
+        logRobotCompanionError("Managed documentation-preview command execution failed", error, {
+          commandUri: String(message.commandUri || "")
+        });
+      }
+    });
     void this.render();
   }
 
@@ -4178,6 +4199,7 @@ class RobotDocPreviewViewProvider {
   </div>
   <script>
     (() => {
+      const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
       const previewRoot = document.querySelector('.preview');
       if (!previewRoot) {
         return;
@@ -4435,6 +4457,15 @@ class RobotDocPreviewViewProvider {
         if (!commandUri) {
           return;
         }
+
+        if (vscodeApi) {
+          vscodeApi.postMessage({
+            type: 'executeCommandUri',
+            commandUri
+          });
+          return;
+        }
+
         const anchor = document.createElement('a');
         anchor.href = commandUri;
         anchor.style.display = 'none';
@@ -15947,6 +15978,15 @@ function escapeHtmlAttribute(value) {
   return escapeHtml(value);
 }
 
+function buildDocumentationPreviewWebviewHtmlForTest(state, selectedBlock, renderedMarkdownHtml) {
+  const provider = new RobotDocPreviewViewProvider();
+  provider._state = {
+    ...createEmptyPreviewState(),
+    ...(state || {})
+  };
+  return provider._buildHtml(selectedBlock, renderedMarkdownHtml);
+}
+
 module.exports = {
   activate,
   deactivate,
@@ -15964,6 +16004,7 @@ module.exports = {
     buildDocumentationBodyFoldingRanges,
     buildDocumentationOverviewRanges,
     renderDocumentationBlockHtml,
+    buildDocumentationPreviewWebviewHtmlForTest,
     expandArrowIndentTokensInRenderedHtml,
     buildOpenLocationCommandUri,
     createVariableValueHover,
