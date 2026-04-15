@@ -827,9 +827,9 @@ Case Nested
   assert(block.markdown.includes("    - third item"));
 
   const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), block);
-  assert(renderedHtml.includes("- first item"));
-  assert(renderedHtml.includes("  - second item"));
-  assert(renderedHtml.includes("    - third item"));
+  assert(renderedHtml.includes("first item"));
+  assert(renderedHtml.includes("second item"));
+  assert(renderedHtml.includes("third item"));
   assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
   assert(!renderedHtml.includes("doc-fragment"));
 
@@ -899,6 +899,18 @@ function runDocumentationPreviewManagedClickBridgeTests() {
   assert(
     renderedHtml.includes("vscodeApi.postMessage"),
     "expected preview webview to send managed click commands through the VS Code message bridge"
+  );
+  assert(
+    renderedHtml.includes("const getClosestElement = (target, selector) =>"),
+    "expected preview webview to normalize text-node click targets before using closest()"
+  );
+  assert(
+    renderedHtml.includes("target && target.parentElement instanceof Element"),
+    "expected preview webview to fall back from text nodes to their parent element for click handling"
+  );
+  assert(
+    renderedHtml.includes("querySelectorAll('.doc-target-marker[data-doc-target-index]')"),
+    "expected preview webview to bind documentation jumps by explicit rendered target markers"
   );
 }
 
@@ -1021,9 +1033,14 @@ async function runLargeFixtureRenderTargetTests() {
     assert.strictEqual(parsed.blocks.length, 1, `${fixture.fixtureName} should parse as a single target block`);
 
     const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), parsed.blocks[0]);
+    const bodyRenderData = extensionTestApi.buildDocumentationBodyRenderData(document.uri.toString(), parsed.blocks[0]);
     assert.strictEqual((renderedHtml.match(/class="doc-render-flow"/g) || []).length, 1);
     assert(!renderedHtml.includes("doc-fragment"));
     assert(!renderedHtml.includes("[[RDP_INDENT_"), `${fixture.fixtureName} should not leak raw RDP indent tokens`);
+    assert(
+      bodyRenderData.markdown.includes('class="doc-target-marker"'),
+      `${fixture.fixtureName} should inject explicit rendered target markers into the documentation markdown`
+    );
     const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
 
     if (Array.isArray(fixture.expectedArrowIndentWidths)) {

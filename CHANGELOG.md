@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.91
+
+- Added a real documentation-preview click UI regression that walks every rendered source target in the involved fixtures, clicks it through the managed webview bridge, and verifies the exact source jump in VS Code.
+- Fixed preview click binding for blocks that render multiple source-target markers inside the same markdown block, so neighboring lines no longer get grouped onto one later jump target.
+- This specifically closes the gap where the old suite only spot-checked a subset of lines and missed grouped later targets in fixtures such as `folding-regression-adjustment.robot`.
+
+## 0.4.90
+
+- Replaced documentation preview source-jump binding by DOM order with explicit per-item target markers embedded in the rendered markdown.
+- This fixes later links drifting to the wrong source lines when the markdown renderer shapes the preview differently than the target list expected.
+- Added focused regressions for marker injection and kept the full VS Code UI suite green.
+
+## 0.4.89
+
+- Hardened documentation preview line-click handling against text-node event targets before calling `closest(...)`.
+- This targets hosts where documentation lines rendered correctly but clicking plain text inside them did nothing.
+- Added a focused regression that locks in the text-node fallback path in the preview webview script.
+
+## 0.4.88
+
+- Fixed documentation preview line clicks by routing them through the managed webview message bridge instead of relying on the older hidden-anchor command trigger.
+- This specifically targets hosts where documentation lines rendered with source targets but did not react when clicked.
+- Added a focused regression for the documentation-preview click bridge while keeping the full UI suite green.
+
 ## 0.4.87
 
 - Switched documentation preview source jumps from the older hidden-anchor trigger to the same managed webview message bridge used by the keyword-doc panel.

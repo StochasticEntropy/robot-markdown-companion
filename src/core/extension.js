@@ -4080,6 +4080,9 @@ class RobotDocPreviewViewProvider {
     .preview .robot-render-line {
       display: block;
     }
+    .preview .doc-target-marker {
+      display: none !important;
+    }
     .preview .robot-arrow-line {
       display: block;
       padding-left: var(--robot-arrow-indent, 0ch);
@@ -4256,6 +4259,19 @@ class RobotDocPreviewViewProvider {
         }
       };
 
+      const getClosestElement = (target, selector) => {
+        if (!selector) {
+          return null;
+        }
+        if (target instanceof Element) {
+          return target.closest(selector);
+        }
+        if (target && target.parentElement instanceof Element) {
+          return target.parentElement.closest(selector);
+        }
+        return null;
+      };
+
       const attachPreviewToggleHandlers = () => {
         const toggleButtons = document.querySelectorAll('[data-preview-toggle-target]');
         for (const button of toggleButtons) {
@@ -4286,6 +4302,65 @@ class RobotDocPreviewViewProvider {
       const attachDocumentationSourceTargets = () => {
         const blockSelector = 'h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, table';
         const wrapperSelector = 'div, section, article, main, body, ol, ul';
+
+        const ensureMarkerTargetSurfaces = (element) => {
+          if (!element || !(element instanceof HTMLElement)) {
+            return [];
+          }
+
+          if (element.dataset.docMarkerTargetsReady === 'true') {
+            return Array.from(element.children).filter(
+              (child) =>
+                child instanceof HTMLElement &&
+                child.classList.contains('doc-clickable-line-group') &&
+                child.getAttribute('data-doc-marker-surface') === 'true'
+            );
+          }
+
+          const directMarkers = Array.from(element.childNodes).filter(
+            (child) => child instanceof HTMLElement && child.classList.contains('doc-target-marker')
+          );
+          if (directMarkers.length <= 1) {
+            return [];
+          }
+
+          element.dataset.docMarkerTargetsReady = 'true';
+          const surfaces = [];
+          let currentMarker = directMarkers[0];
+
+          while (currentMarker instanceof HTMLElement) {
+            const surface = document.createElement('span');
+            surface.className = 'doc-clickable-line-group';
+            surface.setAttribute('data-doc-marker-surface', 'true');
+            element.insertBefore(surface, currentMarker);
+
+            let cursor = currentMarker;
+            while (cursor) {
+              const nextSibling = cursor.nextSibling;
+              if (
+                cursor !== currentMarker &&
+                cursor instanceof HTMLElement &&
+                cursor.classList.contains('doc-target-marker')
+              ) {
+                currentMarker = cursor;
+                break;
+              }
+              if (cursor instanceof HTMLElement && (cursor.tagName === 'UL' || cursor.tagName === 'OL')) {
+                currentMarker = undefined;
+                break;
+              }
+              surface.appendChild(cursor);
+              cursor = nextSibling;
+              if (!cursor) {
+                currentMarker = undefined;
+              }
+            }
+
+            surfaces.push(surface);
+          }
+
+          return surfaces;
+        };
 
         const ensureLineTargetSurfaces = (element) => {
           if (!element || !(element instanceof HTMLElement)) {
@@ -4415,6 +4490,35 @@ class RobotDocPreviewViewProvider {
           return surface;
         };
 
+        const resolveClickableSurfaceForMarker = (marker) => {
+          if (!(marker instanceof HTMLElement)) {
+            return undefined;
+          }
+
+          const parentBlock = marker.closest(blockSelector);
+          if (parentBlock instanceof HTMLElement) {
+            const markerTargetSurfaces = ensureMarkerTargetSurfaces(parentBlock);
+            if (markerTargetSurfaces.length > 0) {
+              const markerSurface = marker.closest('[data-doc-marker-surface="true"]');
+              if (markerSurface instanceof HTMLElement) {
+                return markerSurface;
+              }
+            }
+            ensureLineTargetSurfaces(parentBlock);
+          }
+
+          const lineSurface = marker.closest('.robot-arrow-line, .doc-clickable-line-group, .doc-clickable-surface-li');
+          if (lineSurface instanceof HTMLElement) {
+            return lineSurface;
+          }
+
+          if (parentBlock instanceof HTMLLIElement) {
+            return ensureListItemClickableSurface(parentBlock);
+          }
+
+          return parentBlock instanceof HTMLElement ? parentBlock : undefined;
+        };
+
         const flows = previewRoot.querySelectorAll('[data-doc-render-targets]');
         for (const flow of flows) {
           const rawTargets = String(flow.getAttribute('data-doc-render-targets') || '').trim();
@@ -4429,8 +4533,37 @@ class RobotDocPreviewViewProvider {
             continue;
           }
 
+          const targetMarkers = Array.from(flow.querySelectorAll('.doc-target-marker[data-doc-target-index]'));
+          const boundTargetIndexes = new Set();
+
+          for (const marker of targetMarkers) {
+            const targetIndex = Math.max(0, Number(marker.getAttribute('data-doc-target-index')) || 0);
+            const targetData = targets[targetIndex];
+            const clickableSurface = resolveClickableSurfaceForMarker(marker);
+            if (!clickableSurface || !targetData?.commandUri) {
+              continue;
+            }
+
+            boundTargetIndexes.add(targetIndex);
+            clickableSurface.classList.add('doc-clickable');
+            clickableSurface.setAttribute('data-source-command', String(targetData.commandUri));
+            clickableSurface.setAttribute('tabindex', '0');
+            clickableSurface.setAttribute('role', 'link');
+            if (targetData.label) {
+              clickableSurface.setAttribute('title', String(targetData.label));
+            }
+          }
+
+          if (boundTargetIndexes.size >= targets.length) {
+            continue;
+          }
+
           const blockElements = collectTargetableBlocks(flow);
           for (let index = 0; index < Math.min(blockElements.length, targets.length); index += 1) {
+            if (boundTargetIndexes.has(index)) {
+              continue;
+            }
+
             const targetElement = blockElements[index];
             const targetData = targets[index];
             if (!targetElement || !targetData?.commandUri) {
@@ -4516,7 +4649,7 @@ class RobotDocPreviewViewProvider {
       };
 
       previewRoot.addEventListener('click', (event) => {
-        const interactiveAnchor = event.target.closest('a[href], a[data-href]');
+        const interactiveAnchor = getClosestElement(event.target, 'a[href], a[data-href]');
         if (interactiveAnchor && previewRoot.contains(interactiveAnchor)) {
           const managedCommandUri = getManagedKeywordDocCommandUri(interactiveAnchor);
           if (managedCommandUri) {
@@ -4527,14 +4660,14 @@ class RobotDocPreviewViewProvider {
           }
         }
 
-        const clickable = event.target.closest('[data-source-command]');
+        const clickable = getClosestElement(event.target, '[data-source-command]');
         if (!clickable || !previewRoot.contains(clickable)) {
           return;
         }
 
-        const interactiveAnchor = event.target.closest('a[href], a[data-href]');
-        if (interactiveAnchor && previewRoot.contains(interactiveAnchor)) {
-          if (shouldPreserveAnchorNavigation(interactiveAnchor)) {
+        const nestedAnchor = getClosestElement(event.target, 'a[href], a[data-href]');
+        if (nestedAnchor && previewRoot.contains(nestedAnchor)) {
+          if (shouldPreserveAnchorNavigation(nestedAnchor)) {
             return;
           }
           event.preventDefault();
@@ -4549,7 +4682,7 @@ class RobotDocPreviewViewProvider {
           return;
         }
 
-        const interactiveAnchor = event.target.closest('a[href], a[data-href]');
+        const interactiveAnchor = getClosestElement(event.target, 'a[href], a[data-href]');
         if (interactiveAnchor && previewRoot.contains(interactiveAnchor)) {
           const managedCommandUri = getManagedKeywordDocCommandUri(interactiveAnchor);
           if (managedCommandUri) {
@@ -4559,7 +4692,7 @@ class RobotDocPreviewViewProvider {
           }
         }
 
-        const clickable = event.target.closest('[data-source-command]');
+        const clickable = getClosestElement(event.target, '[data-source-command]');
         if (!clickable || !previewRoot.contains(clickable)) {
           return;
         }
@@ -14847,6 +14980,38 @@ function createDocumentationRenderItem(kind, markdownLines = [], options = {}) {
   };
 }
 
+function buildDocumentationTargetMarkerHtml(targetIndex) {
+  return `<span class="doc-target-marker" data-doc-target-index="${Math.max(0, Number(targetIndex) || 0)}"></span>`;
+}
+
+function injectDocumentationTargetMarker(markdownLines, targetIndex) {
+  const lines = Array.isArray(markdownLines) ? markdownLines.map((line) => String(line || "")) : [];
+  if (lines.length === 0) {
+    return lines;
+  }
+
+  const marker = buildDocumentationTargetMarkerHtml(targetIndex);
+  const firstLine = lines[0];
+
+  if (/^#{1,6}\s+/.test(firstLine)) {
+    lines[0] = firstLine.replace(/^(#{1,6}\s+)/, `$1${marker}`);
+    return lines;
+  }
+
+  if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(firstLine)) {
+    lines[0] = firstLine.replace(/^(\s*(?:[-*+]|\d+[.)])\s+)/, `$1${marker}`);
+    return lines;
+  }
+
+  if (/^\[\[RDP_INDENT_\d+\]\]/.test(firstLine)) {
+    lines[0] = firstLine.replace(/^(\[\[RDP_INDENT_\d+\]\])/, `$1${marker}`);
+    return lines;
+  }
+
+  lines[0] = `${marker}${firstLine}`;
+  return lines;
+}
+
 function isMarkdownListItemLine(line) {
   return /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(String(line || ""));
 }
@@ -15091,12 +15256,13 @@ function buildDocumentationMarkdownSectionRenderData(rawItems) {
       continue;
     }
 
+    const targetIndex = targets.length;
     targets.push({
       commandUri: item.commandUri,
       label: item.label,
       kind: item.kind
     });
-    markdownLines.push(...item.markdownLines);
+    markdownLines.push(...injectDocumentationTargetMarker(item.markdownLines, targetIndex));
   }
 
   while (markdownLines.length > 0 && markdownLines[markdownLines.length - 1] === "") {
@@ -16003,6 +16169,7 @@ module.exports = {
     buildDocumentationFoldingRanges,
     buildDocumentationBodyFoldingRanges,
     buildDocumentationOverviewRanges,
+    buildDocumentationBodyRenderData,
     renderDocumentationBlockHtml,
     buildDocumentationPreviewWebviewHtmlForTest,
     expandArrowIndentTokensInRenderedHtml,
