@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.95
+
+- Added a runtime singleton guard so duplicate `activate()` calls in the same VS Code host cannot register Robot Companion providers twice.
+- Implemented a real activation regression that loads the extension twice and verifies the completion provider only registers once until `deactivate()` runs.
+- This specifically targets host-specific duplicate completion behavior that looked like two Robot Companion providers were active at the same time.
+
+## 0.4.94
+
+- Made completion deduplication more aggressive by collapsing suggestions that insert the same text even when they come from different internal completion kinds.
+- This is intended as a strongest provider-side dedupe for hosts where enum/value suggestions still appeared doubled after the earlier pass.
+- Added a focused regression covering cross-kind duplicate collapse while preserving distinct inserted texts.
+
+## 0.4.93
+
+- Hardened completion deduplication further by collapsing suggestions that share the same visible label and inserted text even if their `filterText` differs.
+- This is a more aggressive pass aimed at host-specific duplicate enum and value suggestions where the user-visible entry is effectively identical.
+- Added a focused regression to keep this harder dedupe behavior locked in.
+
+## 0.4.92
+
+- Added a final completion-item dedupe pass before Robot Companion returns enum, typed-variable, and return-member suggestions to VS Code.
+- This targets host-specific cases where the same semantic suggestion can surface twice, while keeping distinct inserted texts separate.
+- Added a focused regression to lock in the completion dedupe behavior.
+
 ## 0.4.91
 
 - Added a real documentation-preview click UI regression that walks every rendered source target in the involved fixtures, clicks it through the managed webview bridge, and verifies the exact source jump in VS Code.

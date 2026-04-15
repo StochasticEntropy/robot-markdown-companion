@@ -23,6 +23,7 @@ const CMD_UNFOLD_DOCUMENTATION = "robotCompanion.unfoldDocumentation";
 const CMD_FOLD_DOCUMENTATION_OVERVIEW = "robotCompanion.foldDocumentationOverview";
 const CMD_UNFOLD_DOCUMENTATION_OVERVIEW = "robotCompanion.unfoldDocumentationOverview";
 const ROBOT_COMPANION_EXTENSION_ID = "StochasticEntropy.robot-markdown-companion";
+const ROBOT_COMPANION_RUNTIME_SINGLETON_KEY = "__robotCompanionRuntimeSingleton__";
 const DOCUMENTATION_BODY_FOLD_TIER = Object.freeze({
   HEADLINES: 1,
   FIRST_LEVEL: 2,
@@ -34,6 +35,16 @@ let activeDocumentationBodyFoldState = {
   documentUri: "",
   tier: null
 };
+
+function getRobotCompanionRuntimeSingleton() {
+  if (!globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY]) {
+    globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY] = {
+      active: false,
+      lifecycleDisposable: undefined
+    };
+  }
+  return globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY];
+}
 
 const ROBOT_SELECTOR = [
   { language: "robotframework" },
@@ -948,6 +959,19 @@ function shouldPauseRobotCompanionPrewarmForDebug() {
 }
 
 function activate(context) {
+  const runtimeSingleton = getRobotCompanionRuntimeSingleton();
+  if (runtimeSingleton.active) {
+    try {
+      getRobotCompanionOutputChannel().appendLine(
+        "[Robot Companion] Duplicate activate() call ignored; providers already registered in this host."
+      );
+    } catch {
+      // no-op
+    }
+    return;
+  }
+  runtimeSingleton.active = true;
+
   updateRobotDebugPauseState();
   const outputChannel = getRobotCompanionOutputChannel();
   const parser = new RobotDocumentationService();
@@ -983,7 +1007,7 @@ function activate(context) {
     void returnController.refresh();
   };
 
-  context.subscriptions.push(
+  const activationDisposables = [
     outputChannel,
     parser,
     enumHintService,
@@ -1254,6 +1278,21 @@ function activate(context) {
         returnComputeWorker.dispose();
       }
     }
+  ];
+
+  const activationLifecycleDisposable = vscode.Disposable.from(...activationDisposables);
+  runtimeSingleton.lifecycleDisposable = activationLifecycleDisposable;
+  context.subscriptions.push(
+    activationLifecycleDisposable,
+    {
+      dispose() {
+        const latestRuntimeSingleton = getRobotCompanionRuntimeSingleton();
+        if (latestRuntimeSingleton.lifecycleDisposable === activationLifecycleDisposable) {
+          latestRuntimeSingleton.lifecycleDisposable = undefined;
+          latestRuntimeSingleton.active = false;
+        }
+      }
+    }
   );
 
   runtimeCacheService.schedulePrewarmForOpenDocuments(
@@ -1263,7 +1302,11 @@ function activate(context) {
 }
 
 function deactivate() {
-  // no-op
+  const runtimeSingleton = getRobotCompanionRuntimeSingleton();
+  const lifecycleDisposable = runtimeSingleton.lifecycleDisposable;
+  runtimeSingleton.lifecycleDisposable = undefined;
+  runtimeSingleton.active = false;
+  lifecycleDisposable?.dispose?.();
 }
 
 class RobotDocumentationService {
@@ -3422,7 +3465,7 @@ class RobotTypedVariableCompletionProvider {
         memberContext
       );
       if (memberItems.length > 0) {
-        return new vscode.CompletionList(memberItems, false);
+        return new vscode.CompletionList(dedupeCompletionItems(memberItems), false);
       }
       return undefined;
     }
@@ -3436,7 +3479,7 @@ class RobotTypedVariableCompletionProvider {
 
     if (!isTypedVariableCompletionsEnabled()) {
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(enumCompletionItems, false)
+        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
         : undefined;
     }
 
@@ -3500,13 +3543,13 @@ class RobotTypedVariableCompletionProvider {
         { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
       );
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(enumCompletionItems, false)
+        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
         : undefined;
     }
 
     if (cachedMatchingVariables.length === 0) {
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(enumCompletionItems, false)
+        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
         : undefined;
     }
 
@@ -3526,7 +3569,7 @@ class RobotTypedVariableCompletionProvider {
       return item;
     });
 
-    const combinedItems = enumCompletionItems.concat(typedVariableItems);
+    const combinedItems = dedupeCompletionItems(enumCompletionItems.concat(typedVariableItems));
     return combinedItems.length > 0 ? new vscode.CompletionList(combinedItems, false) : undefined;
   }
 
@@ -3746,7 +3789,7 @@ class RobotTypedVariableCompletionProvider {
       memberContext.line,
       memberContext.replaceEnd
     );
-    return candidates.map((candidate) => {
+    return dedupeCompletionItems(candidates.map((candidate) => {
       const insertText = String(candidate?.insertText || candidate?.label || "").trim();
       if (!insertText) {
         return undefined;
@@ -3778,7 +3821,7 @@ class RobotTypedVariableCompletionProvider {
         item.documentation = new vscode.MarkdownString(lines.join("\n\n"));
       }
       return item;
-    }).filter(Boolean);
+    }).filter(Boolean));
   }
 
   _trimMemberCompletionMemo() {
@@ -3787,6 +3830,67 @@ class RobotTypedVariableCompletionProvider {
       this._memberCompletionMemo.delete(firstKey);
     }
   }
+}
+
+function getCompletionItemLabelKey(item) {
+  const rawLabel = item?.label;
+  if (typeof rawLabel === "string") {
+    return rawLabel;
+  }
+  if (rawLabel && typeof rawLabel === "object") {
+    return String(rawLabel.label || rawLabel.value || "");
+  }
+  return String(rawLabel || "");
+}
+
+function getCompletionItemInsertTextKey(item) {
+  const textEdit = item?.textEdit;
+  if (textEdit && typeof textEdit === "object") {
+    const newText = String(textEdit.newText || "");
+    const range = textEdit.range || {};
+    const start = range.start || {};
+    const end = range.end || {};
+    return [
+      newText,
+      Number(start.line) || 0,
+      Number(start.character) || 0,
+      Number(end.line) || 0,
+      Number(end.character) || 0
+    ].join("|");
+  }
+
+  const insertText = item?.insertText;
+  if (typeof insertText === "string") {
+    return insertText;
+  }
+  if (insertText && typeof insertText === "object") {
+    return String(insertText.value || insertText.text || "");
+  }
+  return "";
+}
+
+function dedupeCompletionItems(items) {
+  const dedupedItems = [];
+  const seenKeys = new Set();
+
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item) {
+      continue;
+    }
+
+    const insertTextKey = String(getCompletionItemInsertTextKey(item)).trim();
+    const labelKey = String(getCompletionItemLabelKey(item)).trim();
+    const key = insertTextKey || labelKey;
+
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    seenKeys.add(key);
+    dedupedItems.push(item);
+  }
+
+  return dedupedItems;
 }
 
 class RobotDocPreviewViewProvider {
@@ -16188,6 +16292,7 @@ module.exports = {
     parseKeywordEnumHintsFromPythonSource,
     parseConvertUmlautDecoratorConfigFromPythonSource,
     finalizePythonKeywordDefinitionForIndex,
+    dedupeCompletionItems,
     finalizeStructuredTypeCamelCaseAccess,
     buildEnumPreviewMarkdown
   }
