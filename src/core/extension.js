@@ -23,7 +23,6 @@ const CMD_UNFOLD_DOCUMENTATION = "robotCompanion.unfoldDocumentation";
 const CMD_FOLD_DOCUMENTATION_OVERVIEW = "robotCompanion.foldDocumentationOverview";
 const CMD_UNFOLD_DOCUMENTATION_OVERVIEW = "robotCompanion.unfoldDocumentationOverview";
 const ROBOT_COMPANION_EXTENSION_ID = "StochasticEntropy.robot-markdown-companion";
-const ROBOT_COMPANION_RUNTIME_SINGLETON_KEY = "__robotCompanionRuntimeSingleton__";
 const DOCUMENTATION_BODY_FOLD_TIER = Object.freeze({
   HEADLINES: 1,
   FIRST_LEVEL: 2,
@@ -35,16 +34,6 @@ let activeDocumentationBodyFoldState = {
   documentUri: "",
   tier: null
 };
-
-function getRobotCompanionRuntimeSingleton() {
-  if (!globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY]) {
-    globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY] = {
-      active: false,
-      lifecycleDisposable: undefined
-    };
-  }
-  return globalThis[ROBOT_COMPANION_RUNTIME_SINGLETON_KEY];
-}
 
 const ROBOT_SELECTOR = [
   { language: "robotframework" },
@@ -959,19 +948,6 @@ function shouldPauseRobotCompanionPrewarmForDebug() {
 }
 
 function activate(context) {
-  const runtimeSingleton = getRobotCompanionRuntimeSingleton();
-  if (runtimeSingleton.active) {
-    try {
-      getRobotCompanionOutputChannel().appendLine(
-        "[Robot Companion] Duplicate activate() call ignored; providers already registered in this host."
-      );
-    } catch {
-      // no-op
-    }
-    return;
-  }
-  runtimeSingleton.active = true;
-
   updateRobotDebugPauseState();
   const outputChannel = getRobotCompanionOutputChannel();
   const parser = new RobotDocumentationService();
@@ -1007,7 +983,7 @@ function activate(context) {
     void returnController.refresh();
   };
 
-  const activationDisposables = [
+  context.subscriptions.push(
     outputChannel,
     parser,
     enumHintService,
@@ -1278,21 +1254,6 @@ function activate(context) {
         returnComputeWorker.dispose();
       }
     }
-  ];
-
-  const activationLifecycleDisposable = vscode.Disposable.from(...activationDisposables);
-  runtimeSingleton.lifecycleDisposable = activationLifecycleDisposable;
-  context.subscriptions.push(
-    activationLifecycleDisposable,
-    {
-      dispose() {
-        const latestRuntimeSingleton = getRobotCompanionRuntimeSingleton();
-        if (latestRuntimeSingleton.lifecycleDisposable === activationLifecycleDisposable) {
-          latestRuntimeSingleton.lifecycleDisposable = undefined;
-          latestRuntimeSingleton.active = false;
-        }
-      }
-    }
   );
 
   runtimeCacheService.schedulePrewarmForOpenDocuments(
@@ -1302,11 +1263,7 @@ function activate(context) {
 }
 
 function deactivate() {
-  const runtimeSingleton = getRobotCompanionRuntimeSingleton();
-  const lifecycleDisposable = runtimeSingleton.lifecycleDisposable;
-  runtimeSingleton.lifecycleDisposable = undefined;
-  runtimeSingleton.active = false;
-  lifecycleDisposable?.dispose?.();
+  // no-op
 }
 
 class RobotDocumentationService {
@@ -3465,7 +3422,7 @@ class RobotTypedVariableCompletionProvider {
         memberContext
       );
       if (memberItems.length > 0) {
-        return new vscode.CompletionList(dedupeCompletionItems(memberItems), false);
+        return new vscode.CompletionList(memberItems, false);
       }
       return undefined;
     }
@@ -3479,7 +3436,7 @@ class RobotTypedVariableCompletionProvider {
 
     if (!isTypedVariableCompletionsEnabled()) {
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
+        ? new vscode.CompletionList(enumCompletionItems, false)
         : undefined;
     }
 
@@ -3543,13 +3500,13 @@ class RobotTypedVariableCompletionProvider {
         { maxWaitMs: BACKGROUND_TASK_MAX_WAIT_MS }
       );
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
+        ? new vscode.CompletionList(enumCompletionItems, false)
         : undefined;
     }
 
     if (cachedMatchingVariables.length === 0) {
       return enumCompletionItems.length > 0
-        ? new vscode.CompletionList(dedupeCompletionItems(enumCompletionItems), false)
+        ? new vscode.CompletionList(enumCompletionItems, false)
         : undefined;
     }
 
@@ -3569,7 +3526,7 @@ class RobotTypedVariableCompletionProvider {
       return item;
     });
 
-    const combinedItems = dedupeCompletionItems(enumCompletionItems.concat(typedVariableItems));
+    const combinedItems = enumCompletionItems.concat(typedVariableItems);
     return combinedItems.length > 0 ? new vscode.CompletionList(combinedItems, false) : undefined;
   }
 
@@ -3789,7 +3746,7 @@ class RobotTypedVariableCompletionProvider {
       memberContext.line,
       memberContext.replaceEnd
     );
-    return dedupeCompletionItems(candidates.map((candidate) => {
+    return candidates.map((candidate) => {
       const insertText = String(candidate?.insertText || candidate?.label || "").trim();
       if (!insertText) {
         return undefined;
@@ -3821,7 +3778,7 @@ class RobotTypedVariableCompletionProvider {
         item.documentation = new vscode.MarkdownString(lines.join("\n\n"));
       }
       return item;
-    }).filter(Boolean));
+    }).filter(Boolean);
   }
 
   _trimMemberCompletionMemo() {
@@ -3830,67 +3787,6 @@ class RobotTypedVariableCompletionProvider {
       this._memberCompletionMemo.delete(firstKey);
     }
   }
-}
-
-function getCompletionItemLabelKey(item) {
-  const rawLabel = item?.label;
-  if (typeof rawLabel === "string") {
-    return rawLabel;
-  }
-  if (rawLabel && typeof rawLabel === "object") {
-    return String(rawLabel.label || rawLabel.value || "");
-  }
-  return String(rawLabel || "");
-}
-
-function getCompletionItemInsertTextKey(item) {
-  const textEdit = item?.textEdit;
-  if (textEdit && typeof textEdit === "object") {
-    const newText = String(textEdit.newText || "");
-    const range = textEdit.range || {};
-    const start = range.start || {};
-    const end = range.end || {};
-    return [
-      newText,
-      Number(start.line) || 0,
-      Number(start.character) || 0,
-      Number(end.line) || 0,
-      Number(end.character) || 0
-    ].join("|");
-  }
-
-  const insertText = item?.insertText;
-  if (typeof insertText === "string") {
-    return insertText;
-  }
-  if (insertText && typeof insertText === "object") {
-    return String(insertText.value || insertText.text || "");
-  }
-  return "";
-}
-
-function dedupeCompletionItems(items) {
-  const dedupedItems = [];
-  const seenKeys = new Set();
-
-  for (const item of Array.isArray(items) ? items : []) {
-    if (!item) {
-      continue;
-    }
-
-    const insertTextKey = String(getCompletionItemInsertTextKey(item)).trim();
-    const labelKey = String(getCompletionItemLabelKey(item)).trim();
-    const key = insertTextKey || labelKey;
-
-    if (seenKeys.has(key)) {
-      continue;
-    }
-
-    seenKeys.add(key);
-    dedupedItems.push(item);
-  }
-
-  return dedupedItems;
 }
 
 class RobotDocPreviewViewProvider {
@@ -4188,8 +4084,19 @@ class RobotDocPreviewViewProvider {
       display: none !important;
     }
     .preview .robot-arrow-line {
-      display: block;
+      display: flex;
+      align-items: baseline;
+      column-gap: 1ch;
       padding-left: var(--robot-arrow-indent, 0ch);
+    }
+    .preview .robot-arrow-marker {
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+    .preview .robot-arrow-body {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: break-word;
     }
     .preview .doc-clickable-line-group {
       display: block;
@@ -4313,6 +4220,20 @@ class RobotDocPreviewViewProvider {
       }
 
       const candidates = previewRoot.querySelectorAll('p, li');
+      const buildArrowLineContent = (cleaned) => {
+        const arrowMatch = String(cleaned || '').match(/^(-&gt;|=&gt;|->|=>)(?:\\s|&nbsp;|\\u00A0)*([\\s\\S]*)$/);
+        if (!arrowMatch) {
+          return cleaned;
+        }
+        return (
+          '<span class=\"robot-arrow-marker\">' +
+          arrowMatch[1] +
+          '</span><span class=\"robot-arrow-body\">' +
+          arrowMatch[2] +
+          '</span>'
+        );
+      };
+
       for (const element of candidates) {
         if (!/\\[\\[RDP_INDENT_\\d+\\]\\]/.test(element.innerHTML)) {
           continue;
@@ -4337,7 +4258,7 @@ class RobotDocPreviewViewProvider {
             '<span class=\"robot-render-line robot-arrow-line\" style=\"--robot-arrow-indent:' +
               String(indentWidth) +
               'ch\">' +
-              cleaned +
+              buildArrowLineContent(cleaned) +
               '</span>'
           );
         }
@@ -15028,6 +14949,14 @@ function buildArrowIndentedRenderedHtmlLines(innerHtml) {
   const lines = String(innerHtml || "").split(/<br\s*\/?>|\r?\n/i);
   const rebuilt = [];
 
+  const buildArrowLineContent = (cleanedHtml) => {
+    const match = String(cleanedHtml || "").match(/^(-&gt;|=&gt;|->|=>)(?:\s|&nbsp;|\u00A0)*([\s\S]*)$/);
+    if (!match) {
+      return String(cleanedHtml || "");
+    }
+    return `<span class="robot-arrow-marker">${match[1]}</span><span class="robot-arrow-body">${match[2]}</span>`;
+  };
+
   for (const line of lines) {
     const match = String(line || "").match(/\[\[RDP_INDENT_(\d+)\]\]/);
     if (!match) {
@@ -15043,7 +14972,7 @@ function buildArrowIndentedRenderedHtmlLines(innerHtml) {
     rebuilt.push(
       `<span class="robot-render-line robot-arrow-line" style="--robot-arrow-indent:${String(
         indentWidth
-      )}ch">${cleaned}</span>`
+      )}ch">${buildArrowLineContent(cleaned)}</span>`
     );
   }
 
@@ -15109,6 +15038,15 @@ function injectDocumentationTargetMarker(markdownLines, targetIndex) {
 
   if (/^\[\[RDP_INDENT_\d+\]\]/.test(firstLine)) {
     lines[0] = firstLine.replace(/^(\[\[RDP_INDENT_\d+\]\])/, `$1${marker}`);
+    return lines;
+  }
+
+  const leadingWhitespace = (firstLine.match(/^[ \t]*/) || [""])[0];
+  const arrowPrefix = parseArrowPrefix(firstLine.slice(leadingWhitespace.length));
+  if (arrowPrefix) {
+    lines[0] = `${leadingWhitespace}${arrowPrefix.marker}${marker}${
+      arrowPrefix.rest ? ` ${arrowPrefix.rest}` : ""
+    }`;
     return lines;
   }
 
@@ -16292,7 +16230,6 @@ module.exports = {
     parseKeywordEnumHintsFromPythonSource,
     parseConvertUmlautDecoratorConfigFromPythonSource,
     finalizePythonKeywordDefinitionForIndex,
-    dedupeCompletionItems,
     finalizeStructuredTypeCamelCaseAccess,
     buildEnumPreviewMarkdown
   }

@@ -3,182 +3,138 @@ const fs = require("fs");
 const Module = require("module");
 const path = require("path");
 
-function createBaseVscodeMock(overrides = {}) {
-  const base = {
-    workspace: {
-      getConfiguration: () => ({
-        get: (_key, fallbackValue) => fallbackValue
-      }),
-      getWorkspaceFolder: () => undefined,
-      workspaceFolders: [],
-      textDocuments: [],
-      onDidChangeConfiguration: () => ({ dispose() {} }),
-      onDidOpenTextDocument: () => ({ dispose() {} }),
-      onDidSaveTextDocument: () => ({ dispose() {} }),
-      onDidCloseTextDocument: () => ({ dispose() {} }),
-      onDidChangeTextDocument: () => ({ dispose() {} }),
-      onDidCreateFiles: () => ({ dispose() {} }),
-      onDidDeleteFiles: () => ({ dispose() {} }),
-      findFiles: async () => []
-    },
-    window: {
-      createOutputChannel: () => ({
-        appendLine() {},
-        show() {},
-        dispose() {}
-      }),
-      visibleTextEditors: [],
-      activeTextEditor: undefined,
-      onDidChangeActiveTextEditor: () => ({ dispose() {} }),
-      onDidChangeTextEditorSelection: () => ({ dispose() {} }),
-      registerWebviewViewProvider: () => ({ dispose() {} }),
-      showInformationMessage: async () => undefined,
-      showWarningMessage: async () => undefined,
-      showErrorMessage: async () => undefined
-    },
-    debug: {
-      activeDebugSession: undefined,
-      sessions: [],
-      onDidStartDebugSession: () => ({ dispose() {} }),
-      onDidTerminateDebugSession: () => ({ dispose() {} }),
-      onDidChangeActiveDebugSession: () => ({ dispose() {} })
-    },
-    commands: {
-      registerCommand: () => ({ dispose() {} }),
-      executeCommand: async () => undefined
-    },
-    languages: {
-      registerCodeLensProvider: () => ({ dispose() {} }),
-      registerFoldingRangeProvider: () => ({ dispose() {} }),
-      registerHoverProvider: () => ({ dispose() {} }),
-      registerCompletionItemProvider: () => ({ dispose() {} })
-    },
-    EventEmitter: class {
-      constructor() {
-        this.event = () => undefined;
-      }
-      fire() {}
-      dispose() {}
-    },
-    MarkdownString: class {
-      constructor() {
-        this.value = "";
-        this.isTrusted = false;
-        this.supportHtml = false;
-      }
-      appendMarkdown(value) {
-        this.value += String(value || "");
-      }
-      appendText(value) {
-        this.value += String(value || "");
-      }
-      appendCodeblock(value, language = "") {
-        this.value += `\`\`\`${language}\n${String(value || "")}\n\`\`\``;
-      }
-    },
-    Range: class {
-      constructor(startLine, startCharacter, endLine, endCharacter) {
-        this.start = { line: startLine, character: startCharacter };
-        this.end = { line: endLine, character: endCharacter };
-      }
-    },
-    Hover: class {
-      constructor(contents, range) {
-        this.contents = Array.isArray(contents) ? contents : [contents];
-        this.range = range;
-      }
-    },
-    FoldingRange: class {
-      constructor(start, end, kind) {
-        this.start = start;
-        this.end = end;
-        this.kind = kind;
-      }
-    },
-    CompletionItem: class {},
-    CodeLens: class {},
-    TreeItem: class {},
-    ThemeIcon: class {},
-    CompletionItemKind: {
-      Field: 5,
-      Variable: 6,
-      Value: 12,
-      EnumMember: 20
-    },
-    TreeItemCollapsibleState: {
-      None: 0,
-      Collapsed: 1,
-      Expanded: 2
-    },
-    FoldingRangeKind: {
-      Region: "region"
-    },
-    Uri: {
-      joinPath: (...parts) => ({
-        fsPath: parts
-          .map((part) => String(part?.fsPath || part?.path || part || ""))
-          .filter(Boolean)
-          .join(path.sep)
-      })
-    },
-    Disposable: {
-      from: (...disposables) => ({
-        dispose() {
-          for (const disposable of disposables) {
-            disposable?.dispose?.();
-          }
-        }
-      })
-    }
-  };
-
-  return {
-    ...base,
-    ...overrides,
-    workspace: {
-      ...base.workspace,
-      ...(overrides.workspace || {})
-    },
-    window: {
-      ...base.window,
-      ...(overrides.window || {})
-    },
-    debug: {
-      ...base.debug,
-      ...(overrides.debug || {})
-    },
-    commands: {
-      ...base.commands,
-      ...(overrides.commands || {})
-    },
-    languages: {
-      ...base.languages,
-      ...(overrides.languages || {})
-    },
-    Uri: {
-      ...base.Uri,
-      ...(overrides.Uri || {})
-    },
-    Disposable: {
-      ...base.Disposable,
-      ...(overrides.Disposable || {})
-    }
-  };
-}
-
-function loadExtensionModule(vscodeMock = createBaseVscodeMock()) {
+function loadExtensionModule() {
   const originalLoad = Module._load;
-  const extensionPath = require.resolve("../src/core/extension.js");
-  delete require.cache[extensionPath];
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === "vscode") {
-      return vscodeMock;
+      return {
+        workspace: {
+          getConfiguration: () => ({
+            get: (_key, fallbackValue) => fallbackValue
+          }),
+          getWorkspaceFolder: () => undefined,
+          workspaceFolders: [],
+          onDidChangeConfiguration: () => ({ dispose() {} }),
+          onDidOpenTextDocument: () => ({ dispose() {} }),
+          onDidSaveTextDocument: () => ({ dispose() {} }),
+          onDidCloseTextDocument: () => ({ dispose() {} }),
+          onDidChangeTextDocument: () => ({ dispose() {} }),
+          findFiles: async () => []
+        },
+        window: {
+          createOutputChannel: () => ({
+            appendLine() {},
+            show() {},
+            dispose() {}
+          }),
+          visibleTextEditors: [],
+          activeTextEditor: undefined,
+          onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+          showInformationMessage: async () => undefined,
+          showWarningMessage: async () => undefined,
+          showErrorMessage: async () => undefined
+        },
+        debug: {
+          activeDebugSession: undefined,
+          sessions: [],
+          onDidStartDebugSession: () => ({ dispose() {} }),
+          onDidTerminateDebugSession: () => ({ dispose() {} }),
+          onDidChangeActiveDebugSession: () => ({ dispose() {} })
+        },
+        commands: {
+          registerCommand: () => ({ dispose() {} }),
+          executeCommand: async () => undefined
+        },
+        languages: {
+          registerCodeLensProvider: () => ({ dispose() {} }),
+          registerFoldingRangeProvider: () => ({ dispose() {} }),
+          registerHoverProvider: () => ({ dispose() {} }),
+          registerCompletionItemProvider: () => ({ dispose() {} })
+        },
+        EventEmitter: class {
+          constructor() {
+            this.event = () => undefined;
+          }
+          fire() {}
+          dispose() {}
+        },
+        MarkdownString: class {
+          constructor() {
+            this.value = "";
+            this.isTrusted = false;
+            this.supportHtml = false;
+          }
+          appendMarkdown(value) {
+            this.value += String(value || "");
+          }
+          appendText(value) {
+            this.value += String(value || "");
+          }
+          appendCodeblock(value, language = "") {
+            this.value += `\`\`\`${language}\n${String(value || "")}\n\`\`\``;
+          }
+        },
+        Range: class {
+          constructor(startLine, startCharacter, endLine, endCharacter) {
+            this.start = { line: startLine, character: startCharacter };
+            this.end = { line: endLine, character: endCharacter };
+          }
+        },
+        Hover: class {
+          constructor(contents, range) {
+            this.contents = Array.isArray(contents) ? contents : [contents];
+            this.range = range;
+          }
+        },
+        FoldingRange: class {
+          constructor(start, end, kind) {
+            this.start = start;
+            this.end = end;
+            this.kind = kind;
+          }
+        },
+        CompletionItem: class {},
+        CodeLens: class {},
+        TreeItem: class {},
+        ThemeIcon: class {},
+        CompletionItemKind: {
+          Field: 5,
+          Variable: 6,
+          Value: 12,
+          EnumMember: 20
+        },
+        TreeItemCollapsibleState: {
+          None: 0,
+          Collapsed: 1,
+          Expanded: 2
+        },
+        FoldingRangeKind: {
+          Region: "region"
+        },
+        Uri: {
+          joinPath: (...parts) => ({
+            fsPath: parts
+              .map((part) => String(part?.fsPath || part?.path || part || ""))
+              .filter(Boolean)
+              .join(path.sep)
+          })
+        },
+        Disposable: {
+          from: (...disposables) => ({
+            dispose() {
+              for (const disposable of disposables) {
+                disposable?.dispose?.();
+              }
+            }
+          })
+        }
+      };
     }
     return originalLoad.call(this, request, parent, isMain);
   };
 
   try {
-    return require(extensionPath);
+    return require("../src/core/extension.js");
   } finally {
     Module._load = originalLoad;
   }
@@ -903,9 +859,11 @@ function runRenderedArrowIndentHtmlTransformTests() {
   assert(transformedHtml.includes('class="robot-render-line"'));
   assert(transformedHtml.includes('class="robot-render-line robot-arrow-line" style="--robot-arrow-indent:2ch"'));
   assert(transformedHtml.includes('class="robot-render-line robot-arrow-line" style="--robot-arrow-indent:4ch"'));
+  assert(transformedHtml.includes('class="robot-arrow-marker">-&gt;</span>'));
+  assert(transformedHtml.includes('class="robot-arrow-body">seizable amount = 0,00 EUR</span>'));
+  assert(transformedHtml.includes('class="robot-arrow-body">fallback proof</span>'));
   assert(transformedHtml.includes("Base amount = synthetic value"));
-  assert(transformedHtml.includes("-&gt; seizable amount = 0,00 EUR"));
-  assert(transformedHtml.includes("-&gt; fallback proof"));
+  assert(transformedHtml.includes("-&gt;</span><span"));
 }
 
 function runDocumentationPreviewManagedClickBridgeTests() {
@@ -955,6 +913,30 @@ function runDocumentationPreviewManagedClickBridgeTests() {
   assert(
     renderedHtml.includes("querySelectorAll('.doc-target-marker[data-doc-target-index]')"),
     "expected preview webview to bind documentation jumps by explicit rendered target markers"
+  );
+  assert(
+    renderedHtml.includes("display: flex;"),
+    "expected arrow lines to use a two-part flex layout"
+  );
+  assert(
+    renderedHtml.includes("column-gap: 1ch;"),
+    "expected arrow lines to reserve space between the marker and wrapped body"
+  );
+  assert(
+    renderedHtml.includes("flex: 1 1 auto;"),
+    "expected arrow-line body text to wrap inside the remaining preview width"
+  );
+  assert(
+    renderedHtml.includes("padding-left: var(--robot-arrow-indent, 0ch);"),
+    "expected arrow lines to keep their existing base indent"
+  );
+  assert(
+    renderedHtml.includes('class="robot-arrow-marker"'),
+    "expected fallback preview script to render arrow markers separately"
+  );
+  assert(
+    renderedHtml.includes('class="robot-arrow-body"'),
+    "expected fallback preview script to render arrow text in a wrapping body column"
   );
 }
 
@@ -1094,6 +1076,19 @@ async function runLargeFixtureRenderTargetTests() {
           `${fixture.fixtureName} should render arrow lines with ${indentWidth}ch indentation`
         );
       }
+    }
+
+    const expectedArrowLineCount = fixture.expectedTargets.filter((target) => target.kind === "arrow-line").length;
+    if (expectedArrowLineCount > 0) {
+      const renderedArrowLineCount = (renderedHtml.match(/class="robot-render-line robot-arrow-line"/g) || []).length;
+      assert(
+        renderedArrowLineCount >= expectedArrowLineCount,
+        `${fixture.fixtureName} should render every arrow-line target as a dedicated arrow-line surface`
+      );
+      assert(
+        renderedHtml.includes('class="robot-arrow-body"'),
+        `${fixture.fixtureName} should render arrow text in the wrapping arrow body span`
+      );
     }
 
     for (const expectedTarget of fixture.expectedTargets) {
@@ -2202,163 +2197,6 @@ Case Umlaute Can Insert
   assert.strictEqual(insertPlan.insertLineText, "    ...    kennzeichenBeitragsabführungspflicht=");
 }
 
-function runCompletionDeduplicationTests() {
-  const duplicateEnumItems = [
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 20,
-      filterText: "MANUAL_ADJUSTMENT manual_adjustment",
-      textEdit: {
-        newText: "MANUAL_ADJUSTMENT",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    },
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 20,
-      filterText: "MANUAL_ADJUSTMENT manual_adjustment",
-      textEdit: {
-        newText: "MANUAL_ADJUSTMENT",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    }
-  ];
-  const dedupedEnumItems = extensionTestApi.dedupeCompletionItems(duplicateEnumItems);
-  assert.strictEqual(dedupedEnumItems.length, 1, "Expected identical completion items to collapse to one suggestion.");
-
-  const duplicateFilterTextItems = [
-    duplicateEnumItems[0],
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 20,
-      filterText: "manual_adjustment MANUAL_ADJUSTMENT other-alias",
-      textEdit: {
-        newText: "MANUAL_ADJUSTMENT",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    }
-  ];
-  const dedupedFilterTextItems = extensionTestApi.dedupeCompletionItems(duplicateFilterTextItems);
-  assert.strictEqual(
-    dedupedFilterTextItems.length,
-    1,
-    "Expected completion items with the same visible/inserted value to collapse even when filterText differs."
-  );
-
-  const duplicateAcrossKinds = [
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 20,
-      textEdit: {
-        newText: "MANUAL_ADJUSTMENT",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    },
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 6,
-      textEdit: {
-        newText: "MANUAL_ADJUSTMENT",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    }
-  ];
-  const dedupedAcrossKinds = extensionTestApi.dedupeCompletionItems(duplicateAcrossKinds);
-  assert.strictEqual(
-    dedupedAcrossKinds.length,
-    1,
-    "Expected same inserted text to collapse even when suggestions come from different completion kinds."
-  );
-
-  const distinctInsertTextItems = [
-    duplicateEnumItems[0],
-    {
-      label: "MANUAL_ADJUSTMENT",
-      kind: 20,
-      filterText: "MANUAL_ADJUSTMENT manual_adjustment",
-      textEdit: {
-        newText: "ManualAdjustment",
-        range: {
-          start: { line: 4, character: 12 },
-          end: { line: 4, character: 29 }
-        }
-      }
-    }
-  ];
-  const dedupedDistinctInsertTextItems = extensionTestApi.dedupeCompletionItems(distinctInsertTextItems);
-  assert.strictEqual(
-    dedupedDistinctInsertTextItems.length,
-    2,
-    "Expected completion items with different inserted text to remain distinct."
-  );
-}
-
-function runActivationSingletonTests() {
-  extensionModule.deactivate?.();
-
-  let completionProviderRegistrations = 0;
-  const vscodeMock = createBaseVscodeMock({
-    languages: {
-      registerCompletionItemProvider: () => {
-        completionProviderRegistrations += 1;
-        return { dispose() {} };
-      }
-    }
-  });
-
-  const firstModule = loadExtensionModule(vscodeMock);
-  firstModule.activate({
-    subscriptions: [],
-    globalStorageUri: { fsPath: "/tmp/robot-companion-test-storage" }
-  });
-  assert.strictEqual(
-    completionProviderRegistrations,
-    1,
-    "First activation should register the completion provider once."
-  );
-
-  const secondModule = loadExtensionModule(vscodeMock);
-  secondModule.activate({
-    subscriptions: [],
-    globalStorageUri: { fsPath: "/tmp/robot-companion-test-storage" }
-  });
-  assert.strictEqual(
-    completionProviderRegistrations,
-    1,
-    "Duplicate activation in the same host should not register the completion provider again."
-  );
-
-  secondModule.deactivate();
-
-  const thirdModule = loadExtensionModule(vscodeMock);
-  thirdModule.activate({
-    subscriptions: [],
-    globalStorageUri: { fsPath: "/tmp/robot-companion-test-storage" }
-  });
-  assert.strictEqual(
-    completionProviderRegistrations,
-    2,
-    "Activation after deactivate should register the completion provider again."
-  );
-
-  thirdModule.deactivate();
-}
-
 async function main() {
   runPythonCamelCaseDetectionTests();
   runPythonPropertyParsingTests();
@@ -2385,8 +2223,6 @@ async function main() {
   runDebugPausePolicyTests();
   runConvertUmlautKeywordArgumentIndexingTests();
   runConvertUmlautNamedArgumentLookupTests();
-  runCompletionDeduplicationTests();
-  runActivationSingletonTests();
   console.log("return-field-name-style tests passed");
 }
 
