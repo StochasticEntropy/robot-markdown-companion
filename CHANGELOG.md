@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.106
+
+- Pinned VSCE packaging and publishing to the local `@vscode/vsce` 3.8.0 dependency to avoid the 3.9.0 credential-store regression.
+- Fixed documentation previews that only have keyword-returned variables so their returned-variable section is visible instead of hidden behind a missing toggle.
+- Improved conditional variable resolution when a variable has a base value and only one branch overrides it, showing the base and branch values as ambiguous candidates.
+
 ## 0.4.105
 
 - Aligned plain continuation lines after custom `->` / `=>` documentation markers under the arrow text, matching normal Markdown list continuation indentation.

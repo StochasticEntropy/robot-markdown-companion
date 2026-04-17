@@ -4740,7 +4740,7 @@ class RobotDocPreviewViewProvider {
   }
 }
 
-function buildDocumentationPreviewActionsHtml(documentUri, options = {}) {
+function buildDocumentationPreviewActionsHtml(documentUri) {
   if (!String(documentUri || "").trim()) {
     return "";
   }
@@ -11046,6 +11046,28 @@ function areBranchPathsEqual(left, right) {
   return true;
 }
 
+function findLatestAssignmentForBranchPathBefore(assignments, branchPath, beforeLine) {
+  const safeBeforeLine = Number(beforeLine);
+  if (!Number.isFinite(safeBeforeLine)) {
+    return undefined;
+  }
+
+  let latest = undefined;
+  for (const assignment of Array.isArray(assignments) ? assignments : []) {
+    const assignmentLine = Number(assignment?.startLine);
+    if (!Number.isFinite(assignmentLine) || assignmentLine >= safeBeforeLine) {
+      continue;
+    }
+    if (!areBranchPathsEqual(assignment?.branchPath, branchPath)) {
+      continue;
+    }
+    if (!latest || assignmentLine > Number(latest?.startLine)) {
+      latest = assignment;
+    }
+  }
+  return latest;
+}
+
 function isAssignmentCompatibleWithBranchPath(assignment, branchPath) {
   const assignmentPath = Array.isArray(assignment?.branchPath) ? assignment.branchPath : [];
   const activePath = Array.isArray(branchPath) ? branchPath : [];
@@ -11141,6 +11163,17 @@ function resolveVariableAssignmentSelectionFromAssignments(assignments, line, ac
       if (candidate?.assignment) {
         branchResults.push(candidate.assignment);
       }
+    }
+  }
+
+  if (orderedBranchEntries.length === 1) {
+    const parentFallback = findLatestAssignmentForBranchPathBefore(
+      compatibleAssignments,
+      parentPath,
+      branchResults[0]?.startLine ?? latestAssignment?.startLine
+    );
+    if (parentFallback) {
+      branchResults.push(parentFallback);
     }
   }
 
@@ -15725,25 +15758,27 @@ async function renderDocumentationBlockHtml(documentUri, block) {
       )
     : "";
   const encodedTargets = escapeHtmlAttribute(encodeURIComponent(JSON.stringify(bodyRenderData.targets || [])));
+  const localVariableEntries = buildDocumentationLocalVariableSummaryEntries(documentUri, block);
+  const returnedVariableEntries = buildDocumentationReturnedVariableEntries(documentUri, block);
+  const shouldToggleReturnedVariables = localVariableEntries.length > 0 && returnedVariableEntries.length > 0;
   const localVariableSectionHtml = renderDocumentationVariableSectionHtml(
     "Variables",
-    buildDocumentationLocalVariableSummaryEntries(documentUri, block),
+    localVariableEntries,
     {
       documentUri,
       sectionClassName: "doc-variable-section-primary",
-      footerHtml:
-        Array.isArray(block?.keywordCallAssignments) && block.keywordCallAssignments.length > 0
-          ? renderDocumentationReturnedVariablesToggleHtml("returned-variables")
-          : ""
+      footerHtml: shouldToggleReturnedVariables
+        ? renderDocumentationReturnedVariablesToggleHtml("returned-variables")
+        : ""
     }
   );
   const returnedVariableSectionHtml = renderDocumentationVariableSectionHtml(
     "Returned Variables",
-    buildDocumentationReturnedVariableEntries(documentUri, block),
+    returnedVariableEntries,
     {
       documentUri,
       sectionClassName: "doc-variable-section-secondary",
-      toggleKey: "returned-variables"
+      toggleKey: shouldToggleReturnedVariables ? "returned-variables" : ""
     }
   );
 

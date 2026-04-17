@@ -1269,6 +1269,29 @@ Case With Variables
       returnedSectionHtml.indexOf("Return from Keyword Alpha") < returnedSectionHtml.indexOf("Return from Keyword Beta"),
     "expected returned variables to stay chronological"
   );
+
+  const returnedOnlyDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case With Returned Variables Only
+    [Documentation]    Intro section
+    \${fromKeyword}=    Keyword Alpha
+    Log    \${fromKeyword}
+`);
+  const returnedOnlyParsed = parser.parse(returnedOnlyDocument);
+  const returnedOnlyHtml = await extensionTestApi.renderDocumentationBlockHtml(
+    returnedOnlyDocument.uri.toString(),
+    returnedOnlyParsed.blocks[0]
+  );
+  const returnedOnlyCommandUri = extensionTestApi.buildOpenLocationCommandUri(
+    returnedOnlyDocument.uri.toString(),
+    3
+  );
+  assert(!returnedOnlyHtml.includes("doc-variable-section-primary"));
+  assert(returnedOnlyHtml.includes("Returned Variables"));
+  assert(returnedOnlyHtml.includes(returnedOnlyCommandUri));
+  assert(!returnedOnlyHtml.includes("Show Returned Variables"));
+  assert(!returnedOnlyHtml.includes('data-preview-toggle-section="returned-variables"'));
+  assert(!returnedOnlyHtml.includes("hidden"));
 }
 
 function runConditionalVariableResolutionTests() {
@@ -1334,6 +1357,30 @@ Case Conditional Value
   assert.match(conditionalMarkdown, /`PDF_READY`/);
   assert.match(conditionalMarkdown, /`\$\{None\}`/);
   assert.doesNotMatch(conditionalMarkdown, /Resolved current value:/);
+
+  const partialBranchDocument = createMockRobotDocument(`
+*** Test Cases ***
+Case Conditional Partial Branch
+    \${statusValue}=    Set Variable    BASE
+    IF    \${flag}
+        \${statusValue}=    Set Variable    BRANCH
+    END
+    Keyword Under Test    status=\${statusValue}
+`);
+  const partialBranchParsed = parser.parse(partialBranchDocument);
+  const partialBranchCurrentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${statusValue}",
+      valueStart: "    Keyword Under Test    status=".length
+    },
+    partialBranchParsed,
+    7
+  );
+  assert.strictEqual(partialBranchCurrentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    partialBranchCurrentValue.candidates.map((candidate) => candidate.value),
+    ["BASE", "BRANCH"]
+  );
 
   const keywordBranchDocument = createMockRobotDocument(`
 *** Test Cases ***
@@ -1997,9 +2044,7 @@ Keyword TieredClassicDoc
 function runDocumentationPreviewActionLinkTests() {
   const documentUri = "file:///tmp/folding.robot";
   const encodedArgs = encodeURIComponent(JSON.stringify([documentUri]));
-  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri, {
-    hasReturnedVariables: true
-  });
+  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToHeadlines\\?${encodedArgs}`));
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSteps\\?${encodedArgs}`));
   assert.match(previewActions, />Headlines</);

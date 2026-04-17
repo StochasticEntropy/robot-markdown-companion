@@ -2,7 +2,7 @@
   "name": "robot-markdown-companion",
   "displayName": "Robot Companion",
   "description": "Robot Companion for Robot Framework: return/value/enum intelligence with synchronized documentation preview.",
-  "version": "0.4.105",
+  "version": "0.4.106",
   "publisher": "StochasticEntropy",
   "license": "MIT",
   "keywords": [
@@ -45,11 +45,11 @@
     "package.json"
   ],
   "scripts": {
-    "package": "npx @vscode/vsce package",
-    "publish": "npx @vscode/vsce publish",
-    "publish:patch": "npx @vscode/vsce publish patch",
-    "publish:minor": "npx @vscode/vsce publish minor",
-    "publish:major": "npx @vscode/vsce publish major",
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "publish:patch": "vsce publish patch",
+    "publish:minor": "vsce publish minor",
+    "publish:major": "vsce publish major",
     "test:return-field-name-style": "node tests/return-field-name-style.test.js",
     "test:ui": "node tests/ui/run-ui-tests.js",
     "test:all": "npm run test:return-field-name-style && npm run test:ui"
@@ -404,6 +404,7 @@
   },
   "devDependencies": {
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "3.8.0",
     "jsdom": "^24.1.3",
     "mocha": "^10.8.2"
   }
