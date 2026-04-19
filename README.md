@@ -26,6 +26,16 @@ Robot Companion is a read-only VS Code extension for Robot Framework focused on 
 - `robotCompanion.view` — **Documentation Preview**
 - `robotCompanion.returnView` — **Robot Return Explorer**
 
+## Documentation Color Markup
+
+Documentation comments and `[Documentation]` Markdown support explicit color tags in the live preview and PDF/print export:
+
+- Semantic tags: `<note>`, `<question>`, `<warning>`, `<error>`, `<success>`
+- Color shortcuts: `<red>`, `<orange>`, `<yellow>`, `<green>`, `<blue>`, `<pink>`, `<purple>`, `<gray>`
+- Custom colors: `<color value="red">...</color>`, `<color value="#0f766e">...</color>`
+
+Unsupported colors, attributes, or arbitrary HTML styles are rendered as plain text. Markdown export preserves the author-facing tags.
+
 ## Settings
 
 - `robotCompanion.enableCodeLens`

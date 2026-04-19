@@ -1404,8 +1404,9 @@ async function runDocumentationColorMarkupTests() {
 Case Documentation Colors
     #> ## Flow
     #> - Prüfen, ob <question>die Fachregel noch offen ist</question> und <color value="red">rot markiert</color> wird.
-    #>> -> Ergebnis ist <error>noch fehlerhaft</error>, siehe <color value="#0f766e">neue Klärung</color>.
-    #> - Unsupported stays safe: <color value="expression(alert(1))">not styled</color> and <warning class="bad">no attrs</warning>.
+    #>> -> Ergebnis ist <error>noch fehlerhaft</error>, siehe <color value="#0f766e">neue Klärung</color> und <pink>pink markiert</pink>.
+    #> - Alias colors: <red>rot</red>, <blue>blau</blue>, <gray>grau</gray>.
+    #> - Unsupported stays safe: <color value="expression(alert(1))">not styled</color> and <warning class="bad">no attrs</warning> and <pink class="bad">no pink attrs</pink>.
     #> \`\`\`
     #> <success>literal success tag in fence</success>
     #> \`\`\`
@@ -1419,8 +1420,12 @@ Case Documentation Colors
   assert(renderedHtml.includes('class="doc-color-span doc-color-semantic doc-color-error"'));
   assert(renderedHtml.includes('class="doc-color-span doc-color-custom" style="color:#b42318"'));
   assert(renderedHtml.includes('class="doc-color-span doc-color-custom" style="color:#0f766e"'));
+  assert(renderedHtml.includes('class="doc-color-span doc-color-custom" style="color:#be185d"'));
+  assert(renderedHtml.includes('class="doc-color-span doc-color-custom" style="color:#1d4ed8"'));
+  assert(renderedHtml.includes('class="doc-color-span doc-color-custom" style="color:#4b5563"'));
   assert(!renderedHtml.includes('style="color:expression'));
   assert(!renderedHtml.includes('class="doc-color-span doc-color-semantic doc-color-warning">no attrs'));
+  assert(!renderedHtml.includes('style="color:#be185d">no pink attrs'));
   assert(!renderedHtml.includes('class="doc-color-span doc-color-semantic doc-color-success">literal success'));
 
   const decodedTargets = decodeDocumentationRenderTargets(renderedHtml);
@@ -1438,6 +1443,8 @@ Case Documentation Colors
   assert(markdown.includes('<color value="red">rot markiert</color>'));
   assert(markdown.includes("<error>noch fehlerhaft</error>"));
   assert(markdown.includes('<color value="#0f766e">neue Klärung</color>'));
+  assert(markdown.includes("<pink>pink markiert</pink>"));
+  assert(markdown.includes("<red>rot</red>"));
   assert(!markdown.includes("doc-color-span"));
 
   const pageHtml = extensionTestApi.buildDocumentationPdfExportPageHtml("Case Documentation Colors", renderedHtml, 0);

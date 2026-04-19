@@ -59,9 +59,13 @@ const DOCUMENTATION_COLOR_NAMED_VALUES = Object.freeze({
   yellow: "#a16207",
   green: "#15803d",
   blue: "#1d4ed8",
+  pink: "#be185d",
   purple: "#7e22ce",
   gray: "#4b5563"
 });
+const DOCUMENTATION_COLOR_ALIAS_TAGS = Object.freeze(
+  Object.keys(DOCUMENTATION_COLOR_NAMED_VALUES)
+);
 const ROBOT_CONTROL_CELLS = new Set([
   "if",
   "else",
@@ -15559,6 +15563,15 @@ function buildDocumentationColorSpanOpenHtml(kind, colorValue = "") {
 function prepareDocumentationColorMarkupForRender(markdown) {
   const replacements = new Map();
   let counter = 0;
+  const escapedColorTagNames = [
+    ...DOCUMENTATION_COLOR_SEMANTIC_TAGS,
+    ...DOCUMENTATION_COLOR_ALIAS_TAGS,
+    "color"
+  ].map(escapeRegExp);
+  const unsupportedColorTagPattern = new RegExp(
+    `</?(?:${escapedColorTagNames.join("|")})\\b[^>]*>`,
+    "gi"
+  );
 
   const registerReplacement = (openHtml) => {
     const openToken = `@@RMC_DOC_COLOR_OPEN_${counter}@@`;
@@ -15583,6 +15596,18 @@ function prepareDocumentationColorMarkupForRender(markdown) {
       );
     }
 
+    for (const tagName of DOCUMENTATION_COLOR_ALIAS_TAGS) {
+      transformed = transformed.replace(
+        new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "gi"),
+        (_match, innerText) => {
+          const { openToken, closeToken } = registerReplacement(
+            buildDocumentationColorSpanOpenHtml("custom", tagName)
+          );
+          return `${openToken}${innerText}${closeToken}`;
+        }
+      );
+    }
+
     transformed = transformed.replace(
       /<color\s+value=(["'])([^"']+)\1\s*>([\s\S]*?)<\/color>/gi,
       (match, _quote, colorValue, innerText) => {
@@ -15595,10 +15620,7 @@ function prepareDocumentationColorMarkupForRender(markdown) {
       }
     );
 
-    return transformed.replace(
-      /<\/?(?:note|question|warning|error|success|color)\b[^>]*>/gi,
-      (match) => escapeHtml(match)
-    );
+    return transformed.replace(unsupportedColorTagPattern, (match) => escapeHtml(match));
   };
 
   let inFence = false;
