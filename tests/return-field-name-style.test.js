@@ -1366,12 +1366,16 @@ async function runDocumentationLocalVariableSubstitutionTests() {
 *** Test Cases ***
 Case Documentation Variables
     \${datumLeistungsbeginn}=    Set Variable    01.04.2025
+    \${wirksamkeitsdatum}=    Set Variable    \${datumLeistungsbeginn}
+    \${zweiterAlias}=    Set Variable    \${wirksamkeitsdatum}
     VAR    \${datumAenderungsmeldung}    10.07.2026
     \${sameValue}=    Set Variable    A_B
     \${sameValue}=    Set Variable    A_B
     \${ambiguousDate}=    Set Variable    2025-01-01
     \${ambiguousDate}=    Set Variable    2025-02-01
     #> - Kinder neu: 2 Kinder ab \${datumLeistungsbeginn}, 1 Kind ab \${datumAenderungsmeldung}, 0 Kinder ab 01.09.2035.
+    #>> -> Leistungsdaten ab \${wirksamkeitsdatum} im XML an MTEXT.
+    #>> -> Zweiter Alias ab \${zweiterAlias} bleibt konkret.
     #> - Same value remains literal: \${sameValue}
     #> - Unknown remains variable: \${unknownDate}
     #> - Ambiguous remains variable: \${ambiguousDate}
@@ -1388,7 +1392,11 @@ Case Documentation Variables
   const bodyHtml = extractRenderedSection(renderedHtml, "doc-render-flow");
 
   assert(bodyHtml.includes("2 Kinder ab 01.04.2025, 1 Kind ab 10.07.2026"));
+  assert(bodyHtml.includes("Leistungsdaten ab 01.04.2025 im XML an MTEXT."));
+  assert(bodyHtml.includes("Zweiter Alias ab 01.04.2025 bleibt konkret."));
   assert(!bodyHtml.includes("${datumAenderungsmeldung}"));
+  assert(!bodyHtml.includes("${wirksamkeitsdatum}"));
+  assert(!bodyHtml.includes("${zweiterAlias}"));
   assert(
     bodyHtml.includes("Same value remains literal: A_B") ||
       bodyHtml.includes("Same value remains literal: A\\_B")
@@ -1839,6 +1847,91 @@ Case Var Assignment
   assert.strictEqual(surroundedArgumentCurrentValue.source, "local-variable");
   assert.strictEqual(surroundedArgumentCurrentValue.sourceLabel, "VAR");
   assert.strictEqual(surroundedArgumentCurrentValue.sourceLine, 3);
+}
+
+function runLocalVariableAliasResolutionTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Alias Resolution
+    \${datumLeistungsbeginn}=    Set Variable    01.04.2025
+    \${wirksamkeitsdatum}=    Set Variable    \${datumLeistungsbeginn}
+    \${zweiterAlias}=    Set Variable    \${wirksamkeitsdatum}
+    \${cycleA}=    Set Variable    \${cycleB}
+    \${cycleB}=    Set Variable    \${cycleA}
+    IF    \${condition}
+        \${branchValue}=    Set Variable    \${datumLeistungsbeginn}
+    ELSE
+        \${branchValue}=    Set Variable    02.04.2025
+    END
+    Demo Keyword    wirksamkeitsdatum=\${wirksamkeitsdatum}
+    Demo Keyword    zweiterAlias=\${zweiterAlias}
+    Demo Keyword    cycle=\${cycleB}
+    Demo Keyword    branch=\${branchValue}
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+
+  const aliasHover = extensionTestApi.createVariableValueHover(
+    document,
+    parsed,
+    {
+      line: 12,
+      character: document.lineAt(12).text.indexOf("${wirksamkeitsdatum}") + 3
+    }
+  );
+  assert(aliasHover, "expected hover for alias variable");
+  assert.match(aliasHover.contents[0].value, /`01\.04\.2025`/);
+  assert.match(aliasHover.contents[0].value, /\*\*Source:\*\* `Set Variable` at line 4/);
+  assert.doesNotMatch(aliasHover.contents[0].value, /\$\{datumLeistungsbeginn\}/);
+
+  const aliasArgumentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${wirksamkeitsdatum}",
+      valueStart: document.lineAt(12).text.indexOf("${wirksamkeitsdatum}")
+    },
+    parsed,
+    12
+  );
+  assert.strictEqual(aliasArgumentValue.value, "01.04.2025");
+  assert.strictEqual(aliasArgumentValue.source, "local-variable");
+  assert.strictEqual(aliasArgumentValue.sourceLabel, "Set Variable");
+  assert.strictEqual(aliasArgumentValue.sourceLine, 3);
+
+  const twoHopArgumentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${zweiterAlias}",
+      valueStart: document.lineAt(13).text.indexOf("${zweiterAlias}")
+    },
+    parsed,
+    13
+  );
+  assert.strictEqual(twoHopArgumentValue.value, "01.04.2025");
+  assert.strictEqual(twoHopArgumentValue.sourceLine, 4);
+
+  const cycleArgumentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${cycleB}",
+      valueStart: document.lineAt(14).text.indexOf("${cycleB}")
+    },
+    parsed,
+    14
+  );
+  assert.match(cycleArgumentValue.value, /\$\{cycle[AB]\}/);
+  assert.strictEqual(cycleArgumentValue.source, "local-variable");
+
+  const conditionalArgumentValue = extensionTestApi.resolveNamedArgumentCurrentValueFromSetVariable(
+    {
+      argumentValue: "${branchValue}",
+      valueStart: document.lineAt(15).text.indexOf("${branchValue}")
+    },
+    parsed,
+    15
+  );
+  assert.strictEqual(conditionalArgumentValue.kind, "conditional");
+  assert.deepStrictEqual(
+    conditionalArgumentValue.candidates.map((candidate) => candidate.value).sort(),
+    ["01.04.2025", "02.04.2025"]
+  );
 }
 
 async function runEmbeddedVariableArgumentPreviewTests() {
@@ -2771,6 +2864,7 @@ async function main() {
   await runDocumentationColorMarkupTests();
   runConditionalVariableResolutionTests();
   runRobot7VarAssignmentHoverTests();
+  runLocalVariableAliasResolutionTests();
   await runEmbeddedVariableArgumentPreviewTests();
   runDocumentationFoldingTests();
   runDocumentationBodyFoldingTests();

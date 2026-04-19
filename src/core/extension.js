@@ -75,6 +75,7 @@ const DOCUMENTATION_COLOR_UNSUPPORTED_TAG_PATTERN = new RegExp(
   `</?(?:${DOCUMENTATION_COLOR_TAGS.map(escapeRegExp).join("|")})\\b[^>]*>`,
   "gi"
 );
+const LOCAL_VARIABLE_ALIAS_RESOLUTION_MAX_DEPTH = 10;
 const ROBOT_CONTROL_CELLS = new Set([
   "if",
   "else",
@@ -8698,7 +8699,79 @@ function parseLocalVariableAssignment(lines, lineIndex) {
   return parseVarAssignment(lines, lineIndex) || parseSetVariableAssignment(lines, lineIndex);
 }
 
-function buildLocalVariableConditionalCandidates(selection) {
+function extractSingleLineLocalVariableAssignmentValue(assignment) {
+  if (!assignment || String(assignment?.assignmentKind || "") === "keyword-return") {
+    return "";
+  }
+
+  const valueLines = String(assignment?.valueRaw || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (valueLines.length !== 1) {
+    return extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw);
+  }
+  return parsePythonLiteral(valueLines[0]);
+}
+
+function getExactRobotVariableToken(value) {
+  const trimmed = String(value || "").trim();
+  return /^[@$&%]\{[^}\r\n]+\}$/.test(trimmed) ? trimmed : "";
+}
+
+function resolveLocalVariableAssignmentValueThroughAliases(parsed, runtimeLookups, ownerId, assignment) {
+  let currentAssignment = assignment;
+  let currentValue = extractSingleLineLocalVariableAssignmentValue(currentAssignment);
+  const seenAssignmentIds = new Set();
+
+  for (let depth = 0; depth < LOCAL_VARIABLE_ALIAS_RESOLUTION_MAX_DEPTH; depth += 1) {
+    if (!currentAssignment || String(currentAssignment?.assignmentKind || "") === "keyword-return") {
+      return currentValue;
+    }
+
+    const assignmentId = String(currentAssignment?.id || "");
+    if (assignmentId) {
+      if (seenAssignmentIds.has(assignmentId)) {
+        return currentValue;
+      }
+      seenAssignmentIds.add(assignmentId);
+    }
+
+    const valueLines = String(currentAssignment?.valueRaw || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (valueLines.length !== 1) {
+      return currentValue;
+    }
+
+    const aliasToken = getExactRobotVariableToken(currentValue);
+    if (!aliasToken) {
+      return currentValue;
+    }
+
+    const aliasSelection = resolveVariableAssignmentSelectionFromAssignments(
+      getVariableAssignmentsForOwner(
+        parsed,
+        runtimeLookups,
+        ownerId || currentAssignment.ownerId,
+        normalizeVariableLookupToken(aliasToken)
+      ),
+      Math.max(0, Number(currentAssignment.startLine) - 1),
+      getBranchPathForLine(parsed, currentAssignment.startLine)
+    );
+    if (aliasSelection?.kind !== "single" || !aliasSelection.assignment) {
+      return currentValue;
+    }
+
+    currentAssignment = aliasSelection.assignment;
+    currentValue = extractSingleLineLocalVariableAssignmentValue(currentAssignment);
+  }
+
+  return currentValue;
+}
+
+function buildLocalVariableConditionalCandidates(selection, options = {}) {
   return (selection?.candidates || []).map((candidate) => {
     const assignment = candidate?.assignment;
     if (String(assignment?.assignmentKind || "") === "keyword-return") {
@@ -8710,7 +8783,12 @@ function buildLocalVariableConditionalCandidates(selection) {
         assignment
       };
     }
-    const value = extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw);
+    const value = resolveLocalVariableAssignmentValueThroughAliases(
+      options.parsed,
+      options.runtimeLookups,
+      options.ownerId || assignment?.ownerId,
+      assignment
+    );
     return {
       value,
       source: "local-variable",
@@ -8721,7 +8799,7 @@ function buildLocalVariableConditionalCandidates(selection) {
   });
 }
 
-function buildLocalVariableCurrentValueResultFromSelection(selection, fallbackValue = "") {
+function buildLocalVariableCurrentValueResultFromSelection(selection, fallbackValue = "", options = {}) {
   if (!selection) {
     return {
       kind: "fallback",
@@ -8746,7 +8824,12 @@ function buildLocalVariableCurrentValueResultFromSelection(selection, fallbackVa
     }
     return {
       kind: "single",
-      value: extractCurrentValueFromSetVariableAssignment(selection.assignment.valueRaw),
+      value: resolveLocalVariableAssignmentValueThroughAliases(
+        options.parsed,
+        options.runtimeLookups,
+        options.ownerId || selection.assignment?.ownerId,
+        selection.assignment
+      ),
       source: "local-variable",
       sourceLabel: getLocalVariableAssignmentSourceLabel(selection.assignment),
       sourceLine: selection.assignment.startLine,
@@ -8762,7 +8845,7 @@ function buildLocalVariableCurrentValueResultFromSelection(selection, fallbackVa
       source: "local-variable-conditional",
       sourceLine: undefined,
       sourceLabel: "",
-      candidates: buildLocalVariableConditionalCandidates(selection)
+      candidates: buildLocalVariableConditionalCandidates(selection, options)
     };
   }
 
@@ -8806,7 +8889,12 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
   }
   const currentValueResolution = buildLocalVariableCurrentValueResultFromSelection(
     selectedResolution,
-    variableToken.token
+    variableToken.token,
+    {
+      parsed,
+      runtimeLookups,
+      ownerId: owner.id
+    }
   );
   if (currentValueResolution.kind === "fallback") {
     return undefined;
@@ -8854,7 +8942,7 @@ function createVariableValueHover(document, parsed, position, runtimeCacheServic
     const lineLimit = getVariableHoverLineLimit();
     const isTruncated = lineLimit > 0 && valueLines.length > lineLimit;
     const shownLines = isTruncated ? valueLines.slice(0, lineLimit) : valueLines;
-    const currentValueSummary = shownLines.length > 0 ? shownLines[0] : "";
+    const currentValueSummary = String(currentValueResolution.value || "");
     const assignmentSourceLabel = getLocalVariableAssignmentSourceLabel(currentValueResolution);
 
     if (currentValueSummary.length > 0) {
@@ -9259,7 +9347,12 @@ function resolveNamedArgumentCurrentValueFromSetVariable(argumentContext, parsed
 
   const resolvedResult = buildLocalVariableCurrentValueResultFromSelection(
     selectedResolution,
-    hoveredVariableToken?.token || rawValue
+    hoveredVariableToken?.token || rawValue,
+    {
+      parsed,
+      runtimeLookups,
+      ownerId: owner.id
+    }
   );
   if (resolvedResult.kind === "fallback") {
     return fallback;
@@ -16023,9 +16116,30 @@ function buildDocumentationLocalVariableReplacementMap(block) {
       continue;
     }
 
+    const parsedForBlock = {
+      variableAssignments: Array.isArray(block?.variableAssignments) ? block.variableAssignments : [],
+      branchPathByLine: []
+    };
     const values = uniqueStrings(
       assignments
-        .map((assignment) => extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw || ""))
+        .map((assignment) => {
+          const rawValue = extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw || "");
+          const rawAliasToken = getExactRobotVariableToken(rawValue);
+          const resolvedValue = resolveLocalVariableAssignmentValueThroughAliases(
+            parsedForBlock,
+            undefined,
+            assignment?.ownerId,
+            assignment
+          );
+          if (
+            rawAliasToken &&
+            assignmentsByVariable.has(normalizeVariableLookupToken(rawAliasToken)) &&
+            getExactRobotVariableToken(resolvedValue) === rawAliasToken
+          ) {
+            return "";
+          }
+          return resolvedValue;
+        })
         .map((value) => String(value || "").trim())
         .filter((value) => value.length > 0)
     );
