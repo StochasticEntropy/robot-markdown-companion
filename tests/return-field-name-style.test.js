@@ -980,6 +980,36 @@ function runDocumentationPreviewManagedClickBridgeTests() {
     renderedHtml.includes('class="robot-arrow-body"'),
     "expected fallback preview script to render arrow text in a wrapping body column"
   );
+
+  const keywordRenderedHtml = extensionTestApi.buildDocumentationPreviewWebviewHtmlForTest(
+    {
+      documentUri: "file:///tmp/test.robot",
+      fileName: "test.robot",
+      blocks: [
+        {
+          id: "keyword-block-1",
+          ownerName: "Helper Keyword",
+          title: "Keyword Flow",
+          section: "keywords",
+          startLine: 30,
+          endLine: 40,
+          ownerStartLine: 25
+        }
+      ]
+    },
+    {
+      id: "keyword-block-1",
+      ownerName: "Helper Keyword",
+      title: "Keyword Flow",
+      section: "keywords",
+      startLine: 30,
+      endLine: 40,
+      ownerStartLine: 25
+    },
+    '<section class="doc-render-flow" data-doc-render-targets="%5B%5D"><h2>Keyword Flow</h2></section>'
+  );
+  assert(keywordRenderedHtml.includes("Jump to keyword"));
+  assert(!keywordRenderedHtml.includes("Jump to testcase"));
 }
 
 function decodeDocumentationRenderTargets(renderedHtml) {
@@ -1292,6 +1322,43 @@ Case With Returned Variables Only
   assert(!returnedOnlyHtml.includes("Show Returned Variables"));
   assert(!returnedOnlyHtml.includes('data-preview-toggle-section="returned-variables"'));
   assert(!returnedOnlyHtml.includes("hidden"));
+}
+
+async function runDocumentationLocalVariableSubstitutionTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Documentation Variables
+    \${datumLeistungsbeginn}=    Set Variable    01.04.2025
+    VAR    \${datumAenderungsmeldung}    10.07.2026
+    \${sameValue}=    Set Variable    A_B
+    \${sameValue}=    Set Variable    A_B
+    \${ambiguousDate}=    Set Variable    2025-01-01
+    \${ambiguousDate}=    Set Variable    2025-02-01
+    #> - Kinder neu: 2 Kinder ab \${datumLeistungsbeginn}, 1 Kind ab \${datumAenderungsmeldung}, 0 Kinder ab 01.09.2035.
+    #> - Same value remains literal: \${sameValue}
+    #> - Unknown remains variable: \${unknownDate}
+    #> - Ambiguous remains variable: \${ambiguousDate}
+    #> \`\`\`
+    #> fenced \${datumLeistungsbeginn}
+    #> \`\`\`
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+  const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(
+    document.uri.toString(),
+    parsed.blocks[0]
+  );
+  const bodyHtml = extractRenderedSection(renderedHtml, "doc-render-flow");
+
+  assert(bodyHtml.includes("2 Kinder ab 01.04.2025, 1 Kind ab 10.07.2026"));
+  assert(!bodyHtml.includes("${datumAenderungsmeldung}"));
+  assert(
+    bodyHtml.includes("Same value remains literal: A_B") ||
+      bodyHtml.includes("Same value remains literal: A\\_B")
+  );
+  assert(bodyHtml.includes("${unknownDate}"));
+  assert(bodyHtml.includes("${ambiguousDate}"));
+  assert(bodyHtml.includes("fenced ${datumLeistungsbeginn}"));
 }
 
 function runConditionalVariableResolutionTests() {
@@ -2442,6 +2509,7 @@ async function main() {
   runDocumentationPreviewManagedClickBridgeTests();
   await runLargeFixtureRenderTargetTests();
   await runDocumentationVariableSectionRenderTests();
+  await runDocumentationLocalVariableSubstitutionTests();
   runConditionalVariableResolutionTests();
   runRobot7VarAssignmentHoverTests();
   await runEmbeddedVariableArgumentPreviewTests();

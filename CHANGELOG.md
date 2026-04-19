@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.108
+
+- Replaced unambiguous local `Set Variable` / `VAR` tokens with their values in rendered documentation preview text.
+- Kept ambiguous, unknown, and fenced-code documentation variables unchanged.
+- Labeled keyword documentation owner jumps as `Jump to keyword` instead of `Jump to testcase`.
+
 ## 0.4.107
 
 - Allowed keyword documentation `Insert` actions during active Robot debug sessions while keeping broader editor-manipulation actions, such as folding, protected.

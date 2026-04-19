@@ -3873,17 +3873,18 @@ class RobotDocPreviewViewProvider {
 
         const args = encodeURIComponent(JSON.stringify([this._state.documentUri, block.id]));
         const commandUri = `command:${CMD_OPEN_BLOCK_AT}?${args}`;
-        const testcaseCommand = buildOpenLocationCommandUri(
+        const ownerJumpCommand = buildOpenLocationCommandUri(
           this._state.documentUri,
           Number.isFinite(Number(block.ownerStartLine)) ? Number(block.ownerStartLine) : Number(block.startLine) || 0
         );
+        const ownerJumpLabel = getDocumentationOwnerJumpLabel(block);
         const isActive = selectedBlock && selectedBlock.id === block.id;
         const activeClass = isActive ? " active" : "";
 
         return `<li class=\"list-item${activeClass}\"><div class=\"list-item-row\"><a href=\"${commandUri}\">${escapeHtml(
           block.ownerName || block.title
         )}</a>${
-          testcaseCommand ? `<a class=\"testcase-jump\" href=\"${testcaseCommand}\">Jump to testcase</a>` : ""
+          ownerJumpCommand ? `<a class=\"testcase-jump\" href=\"${ownerJumpCommand}\">${escapeHtml(ownerJumpLabel)}</a>` : ""
         }</div></li>`;
       })
       .join("\n");
@@ -3907,7 +3908,7 @@ class RobotDocPreviewViewProvider {
       ? `<ul class=\"list\">${blockItems}</ul>`
       : "<div class=\"muted\">No documentation or inline #> docs found in Test Cases/Tasks/Keywords.</div>";
 
-    const selectedTestcaseJumpCommand =
+    const selectedOwnerJumpCommand =
       selectedBlock && this._state.documentUri
         ? buildOpenLocationCommandUri(
             this._state.documentUri,
@@ -3916,12 +3917,15 @@ class RobotDocPreviewViewProvider {
               : Number(selectedBlock.startLine) || 0
           )
         : "";
+    const selectedOwnerJumpLabel = getDocumentationOwnerJumpLabel(selectedBlock);
     const previewTitle = selectedBlock
       ? `<h2 class=\"preview-title\">${escapeHtml(selectedBlock.ownerName || selectedBlock.title)}</h2>`
       : "<h2 class=\"preview-title\">Documentation Preview</h2>";
     const previewSubtitle =
-      selectedBlock && selectedTestcaseJumpCommand
-        ? `<div class=\"preview-subtitle\"><a href=\"${selectedTestcaseJumpCommand}\">Jump to testcase</a></div>`
+      selectedBlock && selectedOwnerJumpCommand
+        ? `<div class=\"preview-subtitle\"><a href=\"${selectedOwnerJumpCommand}\">${escapeHtml(
+            selectedOwnerJumpLabel
+          )}</a></div>`
         : "";
 
     return `<!DOCTYPE html>
@@ -4742,6 +4746,17 @@ class RobotDocPreviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function getDocumentationOwnerJumpLabel(blockOrSection) {
+  const section =
+    typeof blockOrSection === "string"
+      ? blockOrSection
+      : String(blockOrSection?.section || "");
+  if (String(section || "").trim().toLowerCase() === "keywords") {
+    return "Jump to keyword";
+  }
+  return "Jump to testcase";
 }
 
 function buildDocumentationPreviewActionsHtml(documentUri) {
@@ -15319,7 +15334,74 @@ function formatDocumentationVariableValuePreview(valueRaw) {
 function escapeMarkdownText(value) {
   return String(value)
     .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
     .replace(/([*_#[\]()<>|])/g, "\\$1");
+}
+
+function buildDocumentationLocalVariableReplacementMap(block) {
+  const assignmentsByVariable = new Map();
+  for (const assignment of Array.isArray(block?.variableAssignments) ? block.variableAssignments : []) {
+    const normalizedVariable = String(assignment?.normalizedVariable || "").trim();
+    if (!normalizedVariable) {
+      continue;
+    }
+    const items = assignmentsByVariable.get(normalizedVariable) || [];
+    items.push(assignment);
+    assignmentsByVariable.set(normalizedVariable, items);
+  }
+
+  const replacements = new Map();
+  for (const [normalizedVariable, assignments] of assignmentsByVariable.entries()) {
+    if (
+      assignments.some(
+        (assignment) => Array.isArray(assignment?.branchPath) && assignment.branchPath.length > 0
+      )
+    ) {
+      continue;
+    }
+
+    const values = uniqueStrings(
+      assignments
+        .map((assignment) => extractCurrentValueFromSetVariableAssignment(assignment?.valueRaw || ""))
+        .map((value) => String(value || "").trim())
+        .filter((value) => value.length > 0)
+    );
+    if (values.length === 1) {
+      replacements.set(normalizedVariable, values[0]);
+    }
+  }
+
+  return replacements;
+}
+
+function substituteDocumentationLocalVariableValues(markdown, block) {
+  const replacements = buildDocumentationLocalVariableReplacementMap(block);
+  if (replacements.size === 0) {
+    return String(markdown || "");
+  }
+
+  let inFence = false;
+  return String(markdown || "")
+    .split(/\r?\n/)
+    .map((line) => {
+      const lineForFenceDetection = String(line || "").replace(
+        /<span class="doc-target-marker" data-doc-target-index="\d+"><\/span>/g,
+        ""
+      );
+      if (lineForFenceDetection.trimStart().startsWith("```")) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) {
+        return line;
+      }
+
+      return String(line || "").replace(/[@$&%]\{[^}\r\n]+\}/g, (variableToken) => {
+        const replacement = replacements.get(normalizeVariableLookupToken(variableToken));
+        return typeof replacement === "string" ? escapeMarkdownText(replacement) : variableToken;
+      });
+    })
+    .join("\n");
 }
 
 function buildDocumentationMarkdownSectionRenderData(rawItems) {
@@ -15756,9 +15838,10 @@ function renderDocumentationVariableSectionHtml(title, entries, options = {}) {
 
 async function renderDocumentationBlockHtml(documentUri, block) {
   const bodyRenderData = buildDocumentationBodyRenderData(documentUri, block);
+  const bodyMarkdown = substituteDocumentationLocalVariableValues(bodyRenderData.markdown, block);
   const bodyHtml = bodyRenderData.markdown
     ? expandArrowIndentTokensInRenderedHtml(
-        await renderMarkdownToHtml(formatMarkdownForDisplay(bodyRenderData.markdown))
+        await renderMarkdownToHtml(formatMarkdownForDisplay(bodyMarkdown))
       )
     : "";
   const encodedTargets = escapeHtmlAttribute(encodeURIComponent(JSON.stringify(bodyRenderData.targets || [])));
