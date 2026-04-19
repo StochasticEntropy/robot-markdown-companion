@@ -2142,17 +2142,70 @@ Keyword TieredClassicDoc
 function runDocumentationPreviewActionLinkTests() {
   const documentUri = "file:///tmp/folding.robot";
   const encodedArgs = encodeURIComponent(JSON.stringify([documentUri]));
-  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri);
+  const blockId = "10:Case Export";
+  const encodedBlockArgs = encodeURIComponent(JSON.stringify([documentUri, blockId]));
+  const previewActions = extensionTestApi.buildDocumentationPreviewActionsHtml(documentUri, blockId);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToHeadlines\\?${encodedArgs}`));
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.foldDocumentationToSteps\\?${encodedArgs}`));
+  assert.match(
+    previewActions,
+    new RegExp(`command:robotCompanion\\.exportDocumentationMarkdown\\?${escapeRegExp(encodedBlockArgs)}`)
+  );
+  assert.match(
+    previewActions,
+    new RegExp(`command:robotCompanion\\.exportDocumentationPdf\\?${escapeRegExp(encodedBlockArgs)}`)
+  );
   assert.match(previewActions, />Headlines</);
   assert.match(previewActions, />Steps</);
+  assert.match(previewActions, /Export:/);
+  assert.match(previewActions, />MD</);
+  assert.match(previewActions, />PDF</);
   assert.doesNotMatch(previewActions, /Show Returned Variables/);
   assert.doesNotMatch(previewActions, /data-preview-toggle-target=\"returned-variables\"/);
   assert.doesNotMatch(previewActions, /foldDocumentationToFirstLevel/);
   assert.doesNotMatch(previewActions, /foldDocumentationToSecondLevel/);
   assert.match(previewActions, new RegExp(`command:robotCompanion\\.unfoldDocumentation\\?${encodedArgs}`));
   assert.strictEqual(extensionTestApi.buildDocumentationPreviewActionsHtml(""), "");
+}
+
+async function runDocumentationExportTests() {
+  const document = createMockRobotDocument(`
+*** Test Cases ***
+Case Export
+    [Documentation]    Intro uses \${localValue}
+    \${localValue}=    Set Variable    42
+    \${returnedValue}=    Keyword Alpha
+    #> ## Flow
+    #> - Uses \${localValue}
+    #>> -> Expected return \${returnedValue}
+`);
+  const parser = new extensionTestApi.RobotDocumentationService();
+  const parsed = parser.parse(document);
+  const block = parsed.blocks[0];
+
+  const markdown = extensionTestApi.buildDocumentationExportMarkdown(document.uri.toString(), block);
+  assert(markdown.startsWith("# Case Export\n\n"));
+  assert(markdown.includes("Intro uses 42"));
+  assert(markdown.includes("## Flow"));
+  assert(markdown.includes("- Uses 42"));
+  assert(markdown.includes("## Variables"));
+  assert(markdown.includes("- `${localValue}`: 42"));
+  assert(markdown.includes("## Returned Variables"));
+  assert(markdown.includes("- `${returnedValue}`: Return from Keyword Alpha"));
+  assert(!markdown.includes("doc-target-marker"));
+  assert(!markdown.includes("data-doc-render-targets"));
+
+  const renderedHtml = await extensionTestApi.renderDocumentationBlockHtml(document.uri.toString(), block);
+  const pdfHtml = extensionTestApi.buildDocumentationPdfExportHtml(document, block, renderedHtml);
+  assert(pdfHtml.includes("<title>Case Export</title>"));
+  assert(pdfHtml.includes("Print / Save as PDF"));
+  assert(pdfHtml.includes("window.print()"));
+  assert(pdfHtml.includes("Choose &quot;Save as PDF&quot;") || pdfHtml.includes('Choose "Save as PDF"'));
+  assert(pdfHtml.includes("Intro uses 42"));
+  assert(pdfHtml.includes("Returned Variables"));
+  assert(pdfHtml.includes(".preview [hidden]"));
+  assert(pdfHtml.includes("display: block !important"));
+  assert(!pdfHtml.includes("[[RDP_INDENT_"));
 }
 
 function runKeywordDocArgumentInsertLinkTests() {
@@ -2548,6 +2601,7 @@ async function main() {
   runDocumentationBodyFoldingTests();
   runKeywordDocumentationBodyFoldingTests();
   runDocumentationPreviewActionLinkTests();
+  await runDocumentationExportTests();
   runKeywordDocArgumentInsertLinkTests();
   runKeywordArgumentInsertPlanTests();
   runHeadlineTailRangeTests();
