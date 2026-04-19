@@ -182,7 +182,7 @@ const RETURN_TYPE_DISK_CACHE_SCHEMA_VERSION = 2;
 const RETURN_TYPE_DISK_WRITE_DEBOUNCE_MS = 450;
 const RETURN_TYPE_CACHE_MAX_ENTRIES_DEFAULT = 400;
 const DEBUG_PAUSED_INFO_MESSAGE =
-  "Robot Companion editor actions are limited while a Robot debug session is active. Hovers, preview, and documentation views remain available.";
+  "Robot Companion editor actions are limited while a Robot debug session is active. Hovers, preview, documentation views, and keyword argument Insert remain available.";
 let ROBOT_DEBUG_PAUSED = false;
 let ROBOT_COMPANION_OUTPUT_CHANNEL = undefined;
 
@@ -937,6 +937,10 @@ function shouldPauseRobotCompanionInteractiveUiForDebug() {
 
 function shouldPauseRobotCompanionEditorManipulationForDebug() {
   return ROBOT_DEBUG_PAUSED;
+}
+
+function shouldPauseRobotCompanionKeywordArgumentInsertForDebug() {
+  return false;
 }
 
 function shouldPauseRobotCompanionPassiveEditorFeaturesForDebug() {
@@ -6498,7 +6502,7 @@ function buildKeywordArgumentInsertPlan(document, payload = {}) {
 }
 
 async function insertKeywordArgumentFromPayload(payload = {}, returnController) {
-  if (shouldPauseRobotCompanionEditorManipulationForDebug()) {
+  if (shouldPauseRobotCompanionKeywordArgumentInsertForDebug()) {
     return;
   }
 
@@ -16291,6 +16295,7 @@ module.exports = {
     resolveEnumValuePreviewFromContext,
     shouldPauseRobotCompanionInteractiveUiForDebug,
     shouldPauseRobotCompanionEditorManipulationForDebug,
+    shouldPauseRobotCompanionKeywordArgumentInsertForDebug,
     shouldPauseRobotCompanionPassiveEditorFeaturesForDebug,
     shouldPauseRobotCompanionPrewarmForDebug,
     setRobotDebugPausedForTest(value) {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.107
+
+- Allowed keyword documentation `Insert` actions during active Robot debug sessions while keeping broader editor-manipulation actions, such as folding, protected.
+
 ## 0.4.106
 
 - Pinned VSCE packaging and publishing to the local `@vscode/vsce` 3.8.0 dependency to avoid the 3.9.0 credential-store regression.
